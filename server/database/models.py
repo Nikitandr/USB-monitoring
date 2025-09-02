@@ -159,7 +159,7 @@ class Permission(BaseModel):
         """Проверка разрешения пользователя на устройство"""
         query = "SELECT granted FROM permissions WHERE user_id = ? AND device_id = ?"
         result = self.execute_query(query, (user_id, device_id))
-        return result[0]['granted'] if result else None
+        return bool(result[0]['granted']) if result else None
     
     def set_permission(self, user_id: int, device_id: int, granted: bool) -> bool:
         """Установка разрешения"""
