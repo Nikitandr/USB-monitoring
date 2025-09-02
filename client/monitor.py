@@ -358,40 +358,70 @@ def mount_device(device_node):
     bus = SystemBus()
     obj_path = find_fs_object_path(bus, device_node)
     if not obj_path:
-        print("    ! Не найден объект UDisks2 для монтирования")
+        log_message('ERROR', "Не найден объект UDisks2 для монтирования")
         return
 
     # Получаем имя активного пользователя
     user = get_active_user()
-    print(user)
     if not user:
-        print("    ! Не удалось определить активного пользователя; монтируем под /media/root")
+        log_message('WARNING', "Не удалось определить активного пользователя; монтируем под /media/root")
         mount_base = "/media/root"
+        target_user = "root"
     else:
         mount_base = f"/media/{user}"
+        target_user = user
 
-    # Убедимся, что базовая папка существует (если нужно создаём её)
+    # Убедимся, что базовая папка существует
     if not os.path.isdir(mount_base):
         try:
             os.makedirs(mount_base, exist_ok=True)
             # Устанавливаем владельца каталога на нужного пользователя
-            subprocess.run(["chown", f"{user}:{user}", mount_base], check=False)
+            if target_user != "root":
+                subprocess.run(["chown", f"{target_user}:{target_user}", mount_base], check=False)
         except Exception as e:
-            print(f"    ! Не удалось создать или назначить {mount_base}: {e}")
+            log_message('ERROR', f"Не удалось создать или назначить {mount_base}: {e}")
 
     fs = bus.get(UDISKS_BUS_NAME, obj_path)[FS_IFACE]
-    options = GLib.Variant('as', ['rw','nosuid','nodev'])
+    
+    # Монтируем с указанием владельца
+    if target_user != "root":
+        # Получаем UID пользователя
+        try:
+            import pwd
+            user_info = pwd.getpwnam(target_user)
+            uid = user_info.pw_uid
+            gid = user_info.pw_gid
+            
+            # Опции монтирования с указанием владельца
+            options = GLib.Variant('as', [
+                'rw', 'nosuid', 'nodev', 'relatime',
+                f'uid={uid}', f'gid={gid}', 'umask=0022'
+            ])
+        except KeyError:
+            log_message('ERROR', f"Пользователь {target_user} не найден")
+            options = GLib.Variant('as', ['rw','nosuid','nodev'])
+    else:
+        options = GLib.Variant('as', ['rw','nosuid','nodev'])
+    
     try:
         target = fs.Mount({'options': options})
-        print(f"    → Смонтировано в: {target}")
+        log_message('INFO', f"Устройство смонтировано в: {target}")
+        
+        # Дополнительно устанавливаем права на точку монтирования
+        if target_user != "root" and os.path.exists(target):
+            subprocess.run(["chown", f"{target_user}:{target_user}", target], check=False)
+            subprocess.run(["chmod", "755", target], check=False)
+            
     except Exception as e:
-        print(f"    ! Ошибка монтирования: {e}")
+        log_message('ERROR', f"Ошибка монтирования: {e}")
 
 def send_desktop_notification(username, title, message):
     """Отправляет уведомление пользователю"""
     try:
-        # Получаем DISPLAY для пользователя
+        # Получаем DISPLAY и другие переменные окружения для пользователя
         display = None
+        xdg_runtime_dir = None
+        
         for proc_dir in os.listdir('/proc'):
             if not proc_dir.isdigit():
                 continue
@@ -401,27 +431,46 @@ def send_desktop_notification(username, title, message):
                     with open(environ_path, 'rb') as f:
                         environ_data = f.read().decode('utf-8', errors='ignore')
                     
-                    if 'DISPLAY=' in environ_data and f'USER={username}' in environ_data:
+                    if f'USER={username}' in environ_data and 'DISPLAY=' in environ_data:
                         for line in environ_data.split('\0'):
                             if line.startswith('DISPLAY='):
                                 display = line.split('=', 1)[1]
-                                break
+                            elif line.startswith('XDG_RUNTIME_DIR='):
+                                xdg_runtime_dir = line.split('=', 1)[1]
                         if display:
                             break
             except (OSError, IOError, PermissionError):
                 continue
         
         if display:
-            # Отправляем уведомление через notify-send
-            env = os.environ.copy()
-            env['DISPLAY'] = display
-            subprocess.run([
-                'sudo', '-u', username, 'notify-send', 
-                '--urgency=normal', 
-                '--expire-time=5000',
-                title, message
-            ], env=env, check=False)
-            log_message('DEBUG', f"Уведомление отправлено пользователю {username}")
+            # Получаем UID пользователя
+            try:
+                import pwd
+                user_info = pwd.getpwnam(username)
+                uid = user_info.pw_uid
+                
+                # Настраиваем окружение для уведомления
+                env = {
+                    'DISPLAY': display,
+                    'USER': username,
+                    'HOME': user_info.pw_dir,
+                }
+                
+                if xdg_runtime_dir:
+                    env['XDG_RUNTIME_DIR'] = xdg_runtime_dir
+                else:
+                    env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
+                
+                # Отправляем уведомление без sudo, используя runuser
+                subprocess.run([
+                    'runuser', '-l', username, '-c', 
+                    f'DISPLAY={display} notify-send --urgency=normal --expire-time=5000 "{title}" "{message}"'
+                ], env=env, check=False, timeout=10)
+                
+                log_message('DEBUG', f"Уведомление отправлено пользователю {username}")
+                
+            except (KeyError, subprocess.TimeoutExpired) as e:
+                log_message('WARNING', f"Не удалось отправить уведомление: {e}")
         else:
             log_message('WARNING', f"Не удалось найти DISPLAY для пользователя {username}")
             
