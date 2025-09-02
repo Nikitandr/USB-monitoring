@@ -104,8 +104,8 @@ def check_device_permission_server(username, vid, pid, serial, server_config):
                 result = response.json()
                 status = result.get('status', 'unknown')
                 
-                # Кэшируем результат только для allow/deny, но не для unknown
-                if status in ['allow', 'deny']:
+                # Кэшируем результат только для allowed/denied, но не для unknown
+                if status in ['allowed', 'denied']:
                     _device_cache[device_key] = status
                     _cache_timestamps[device_key] = current_time
                     # Очищаем ожидающий запрос, если устройство получило окончательный статус
@@ -484,7 +484,7 @@ def main():
         # Проверяем политику через сервер
         policy = check_device_policy(username, vid, pid, serial, device_info_str, cfg)
 
-        if policy == 'allow':
+        if policy == 'allowed':
             log_message('INFO', f"Устройство разрешено: {log_info}")
             send_desktop_notification(
                 username, 
@@ -493,7 +493,7 @@ def main():
             )
             mount_device(device.device_node)
             
-        elif policy == 'deny':
+        elif policy == 'denied':
             log_message('WARNING', f"Устройство запрещено: {log_info}")
             send_desktop_notification(
                 username, 
