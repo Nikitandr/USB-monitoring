@@ -1,0 +1,125 @@
+@startuml USB_Security_System_C4
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title USB Security Monitoring System - Container Diagram
+
+Person(user, "Network User", "Сотрудник с Linux-машиной")
+Person(admin, "Administrator", "IT-администратор с Windows-машиной")
+
+System_Boundary(usb_system, "USB Security Monitoring System") {
+    Container(linux_client, "Linux Client", "Python, pyudev, D-Bus", "Мониторит USB-подключения, контролирует монтирование")
+    Container(central_server, "Central Server", "Python Flask/FastAPI", "Управляет пользователями и разрешениями")
+    Container(database, "Database", "SQLite", "Хранит пользователей, устройства, разрешения")
+    Container(admin_app, "Admin Application", "Python tkinter/PyQt", "GUI для управления разрешениями")
+    Container(notification_service, "Notification Service", "WebSocket/HTTP", "Уведомления администратору")
+}
+
+Rel(user, linux_client, "Подключает USB-устройства")
+Rel(linux_client, central_server, "Запрашивает разрешения", "HTTPS/REST API")
+Rel(central_server, database, "Читает/записывает данные", "SQL")
+Rel(admin, admin_app, "Управляет разрешениями")
+Rel(admin_app, central_server, "Отправляет команды", "HTTPS/REST API")
+Rel(central_server, notification_service, "Отправляет уведомления")
+Rel(notification_service, admin_app, "Получает уведомления", "WebSocket")
+
+@enduml
+
+@startuml USB_Security_System_Component
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title USB Security Monitoring System - Component Diagram
+
+Container_Boundary(linux_client, "Linux Client") {
+    Component(usb_monitor, "USB Monitor", "pyudev", "Отслеживает подключение USB-устройств")
+    Component(mount_controller, "Mount Controller", "UDisks2 D-Bus", "Контролирует монтирование устройств")
+    Component(policy_engine, "Policy Engine", "Python", "Проверяет разрешения пользователей")
+    Component(api_client, "API Client", "requests", "Взаимодействует с центральным сервером")
+    Component(config_manager, "Config Manager", "YAML", "Управляет локальной конфигурацией")
+}
+
+Container_Boundary(central_server, "Central Server") {
+    Component(auth_service, "Authentication Service", "JWT/Session", "Аутентификация пользователей")
+    Component(user_service, "User Management", "Python", "Управление пользователями")
+    Component(device_service, "Device Management", "Python", "Управление устройствами")
+    Component(permission_service, "Permission Service", "Python", "Управление разрешениями")
+    Component(api_gateway, "API Gateway", "Flask/FastAPI", "REST API эндпоинты")
+    Component(notification_handler, "Notification Handler", "WebSocket", "Обработка уведомлений")
+}
+
+Container_Boundary(admin_app, "Admin Application") {
+    Component(gui_interface, "GUI Interface", "tkinter/PyQt", "Пользовательский интерфейс")
+    Component(request_manager, "Request Manager", "Python", "Обработка запросов на разрешения")
+    Component(user_manager, "User Manager", "Python", "Управление пользователями")
+    Component(device_manager, "Device Manager", "Python", "Управление устройствами")
+    Component(notification_client, "Notification Client", "WebSocket", "Получение уведомлений")
+}
+
+Rel(usb_monitor, policy_engine, "Передает информацию об устройстве")
+Rel(policy_engine, config_manager, "Читает локальные правила")
+Rel(policy_engine, api_client, "Запрашивает разрешения")
+Rel(policy_engine, mount_controller, "Разрешает/запрещает монтирование")
+Rel(api_client, api_gateway, "HTTP/REST запросы")
+
+Rel(api_gateway, auth_service, "Проверка аутентификации")
+Rel(api_gateway, user_service, "Операции с пользователями")
+Rel(api_gateway, device_service, "Операции с устройствами")
+Rel(api_gateway, permission_service, "Операции с разрешениями")
+Rel(permission_service, notification_handler, "Отправка уведомлений")
+
+Rel(gui_interface, request_manager, "Обработка запросов")
+Rel(gui_interface, user_manager, "Управление пользователями")
+Rel(gui_interface, device_manager, "Управление устройствами")
+Rel(notification_client, gui_interface, "Отображение уведомлений")
+Rel(request_manager, api_gateway, "HTTP/REST запросы")
+Rel(user_manager, api_gateway, "HTTP/REST запросы")
+Rel(device_manager, api_gateway, "HTTP/REST запросы")
+
+@enduml
+
+@startuml USB_Security_System_Sequence
+title Последовательность действий при подключении USB-устройства
+
+actor User as "Пользователь"
+participant LinuxClient as "Linux Client"
+participant CentralServer as "Central Server"
+participant Database as "Database"
+participant AdminApp as "Admin App"
+actor Admin as "Администратор"
+
+User -> LinuxClient: Подключает USB-устройство
+LinuxClient -> LinuxClient: Определяет VID/PID/Serial
+LinuxClient -> LinuxClient: Проверяет локальный кэш
+LinuxClient -> CentralServer: GET /api/user/{user}/device/{device_id}/permission
+CentralServer -> Database: Проверяет разрешения пользователя
+Database -> CentralServer: Возвращает результат
+
+alt Устройство разрешено
+    CentralServer -> LinuxClient: 200 OK (разрешено)
+    LinuxClient -> LinuxClient: Монтирует устройство
+    LinuxClient -> User: Устройство доступно
+else Устройство запрещено
+    CentralServer -> LinuxClient: 403 Forbidden (запрещено)
+    LinuxClient -> User: Устройство заблокировано
+else Устройство неизвестно
+    CentralServer -> LinuxClient: 404 Not Found (неизвестно)
+    CentralServer -> Database: Создает запрос на разрешение
+    CentralServer -> AdminApp: WebSocket уведомление
+    AdminApp -> Admin: Показывает запрос на разрешение
+    
+    alt Администратор разрешает
+        Admin -> AdminApp: Одобряет устройство
+        AdminApp -> CentralServer: POST /api/approve/{request_id}
+        CentralServer -> Database: Добавляет разрешение
+        CentralServer -> LinuxClient: WebSocket уведомление (разрешено)
+        LinuxClient -> LinuxClient: Монтирует устройство
+        LinuxClient -> User: Устройство доступно
+    else Администратор запрещает
+        Admin -> AdminApp: Отклоняет устройство
+        AdminApp -> CentralServer: POST /api/deny/{request_id}
+        CentralServer -> Database: Добавляет запрет
+        CentralServer -> LinuxClient: WebSocket уведомление (запрещено)
+        LinuxClient -> User: Устройство заблокировано
+    end
+end
+
+@enduml

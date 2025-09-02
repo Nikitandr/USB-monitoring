@@ -1,0 +1,447 @@
+{% extends "base.html" %}
+
+{% block title %}Управление пользователями - USB Monitor Admin{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1 class="h3 mb-4">
+            <i class="fas fa-users"></i> Управление пользователями
+        </h1>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">
+                    <i class="fas fa-list"></i> Список пользователей
+                </h5>
+                <span class="badge bg-primary">{{ users|length }}</span>
+            </div>
+            <div class="card-body">
+                {% if users %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Имя пользователя</th>
+                                <th>Дата регистрации</th>
+                                <th>Разрешенные устройства</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for user in users %}
+                            <tr>
+                                <td>{{ user.id }}</td>
+                                <td>
+                                    <i class="fas fa-user"></i> {{ user.username }}
+                                </td>
+                                <td>
+                                    <small>{{ user.created_at }}</small>
+                                </td>
+                                <td>
+                                    <span class="badge bg-info" id="device-count-{{ user.id }}">
+                                        Загрузка...
+                                    </span>
+                                </td>
+                                <td>
+                                    <button type="button" 
+                                            class="btn btn-primary btn-sm manage-devices-btn" 
+                                            data-username="{{ user.username }}" 
+                                            data-user-id="{{ user.id }}">
+                                        <i class="fas fa-cog"></i> Управление устройствами
+                                    </button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-4">
+                    <i class="fas fa-users fa-3x text-muted mb-3"></i>
+                    <h5>Нет пользователей</h5>
+                    <p class="text-muted">Пользователи появятся автоматически при первом подключении устройств</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно для управления устройствами пользователя -->
+<div class="modal fade" id="userDevicesModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="userDevicesModalTitle">
+                    <i class="fab fa-usb"></i> Управление устройствами пользователя
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="userDevicesContent">
+                    <div class="text-center">
+                        <div class="spinner-border" role="status">
+                            <span class="visually-hidden">Загрузка...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно для добавления устройства -->
+<div class="modal fade" id="addDeviceModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <i class="fas fa-plus"></i> Добавить устройство
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addDeviceForm">
+                    <div class="mb-3">
+                        <label for="deviceVid" class="form-label">VID (Vendor ID)</label>
+                        <input type="text" class="form-control" id="deviceVid" required 
+                               placeholder="например: 0781" pattern="[0-9a-fA-F]{4}">
+                        <div class="form-text">4-значный шестнадцатеричный код</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="devicePid" class="form-label">PID (Product ID)</label>
+                        <input type="text" class="form-control" id="devicePid" required 
+                               placeholder="например: 5571" pattern="[0-9a-fA-F]{4}">
+                        <div class="form-text">4-значный шестнадцатеричный код</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="deviceSerial" class="form-label">Serial Number (опционально)</label>
+                        <input type="text" class="form-control" id="deviceSerial" 
+                               placeholder="например: 4C531001230318112343">
+                        <div class="form-text">Серийный номер устройства (если известен)</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="deviceName" class="form-label">Название устройства</label>
+                        <input type="text" class="form-control" id="deviceName" 
+                               placeholder="например: SanDisk Cruzer Blade">
+                    </div>
+                    <div class="mb-3">
+                        <label for="deviceDescription" class="form-label">Описание</label>
+                        <textarea class="form-control" id="deviceDescription" rows="2" 
+                                  placeholder="например: USB Flash Drive 16GB"></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" id="addDeviceBtn">
+                    <i class="fas fa-plus"></i> Добавить
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentUserId = null;
+let currentUsername = null;
+
+// Загружаем количество устройств для каждого пользователя
+document.addEventListener('DOMContentLoaded', function() {
+    // Load device counts for all users by finding all device count badges
+    const deviceCountBadges = document.querySelectorAll('[id^="device-count-"]');
+    deviceCountBadges.forEach(function(badge) {
+        const userId = badge.id.replace('device-count-', '');
+        loadUserDeviceCount(userId);
+    });
+    
+    // Add event listeners
+    document.addEventListener('click', function(e) {
+        if (e.target.closest('.manage-devices-btn')) {
+            const btn = e.target.closest('.manage-devices-btn');
+            const username = btn.getAttribute('data-username');
+            const userId = btn.getAttribute('data-user-id');
+            manageUserDevices(username, userId);
+        } else if (e.target.closest('.add-device-btn')) {
+            showAddDeviceModal();
+        }
+    });
+    
+    // Add device button event listener
+    const addDeviceBtn = document.getElementById('addDeviceBtn');
+    if (addDeviceBtn) {
+        addDeviceBtn.addEventListener('click', addDeviceToUser);
+    }
+});
+
+function loadUserDeviceCount(userId) {
+    const badge = document.getElementById('device-count-' + userId);
+    if (!badge) return;
+    
+    // Получаем username из кнопки управления устройствами
+    const manageBtn = document.querySelector(`[data-user-id="${userId}"]`);
+    if (!manageBtn) return;
+    
+    const username = manageBtn.getAttribute('data-username');
+    
+    // AJAX запрос для получения количества устройств
+    fetch('/api/users/' + encodeURIComponent(username) + '/devices')
+        .then(response => response.json())
+        .then(data => {
+            if (data.devices) {
+                const count = data.devices.length;
+                badge.textContent = count;
+                badge.className = count > 0 ? 'badge bg-success' : 'badge bg-secondary';
+            } else {
+                badge.textContent = '0';
+                badge.className = 'badge bg-secondary';
+            }
+        })
+        .catch(error => {
+            console.error('Error loading device count for user', userId, ':', error);
+            badge.textContent = '?';
+            badge.className = 'badge bg-warning';
+        });
+}
+
+function manageUserDevices(username, userId) {
+    currentUserId = userId;
+    currentUsername = username;
+    
+    document.getElementById('userDevicesModalTitle').innerHTML = 
+        '<i class="fab fa-usb"></i> Управление устройствами: ' + username;
+    
+    // Показываем модальное окно
+    const modal = new bootstrap.Modal(document.getElementById('userDevicesModal'));
+    modal.show();
+    
+    // Загружаем устройства пользователя
+    loadUserDevices(userId);
+}
+
+function loadUserDevices(userId) {
+    const content = document.getElementById('userDevicesContent');
+    content.innerHTML = 
+        '<div class="text-center">' +
+            '<div class="spinner-border" role="status">' +
+                '<span class="visually-hidden">Загрузка...</span>' +
+            '</div>' +
+        '</div>';
+    
+    // Реальный AJAX запрос к серверу для получения устройств пользователя
+    fetch('/api/users/' + encodeURIComponent(currentUsername) + '/devices')
+        .then(response => response.json())
+        .then(data => {
+            if (data.devices) {
+                displayUserDevices(data.devices);
+            } else {
+                showNotification('Ошибка при загрузке устройств: ' + (data.error || 'Неизвестная ошибка'), 'danger');
+                displayUserDevices([]);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading user devices:', error);
+            showNotification('Ошибка при загрузке устройств: ' + error.message, 'danger');
+            displayUserDevices([]);
+        });
+}
+
+function displayUserDevices(devices) {
+    const content = document.getElementById('userDevicesContent');
+    
+    let html = 
+        '<div class="d-flex justify-content-between align-items-center mb-3">' +
+            '<h6>Разрешенные устройства</h6>' +
+            '<button type="button" class="btn btn-success btn-sm add-device-btn">' +
+                '<i class="fas fa-plus"></i> Добавить устройство' +
+            '</button>' +
+        '</div>';
+    
+    if (devices.length === 0) {
+        html += 
+            '<div class="text-center py-4">' +
+                '<i class="fab fa-usb fa-3x text-muted mb-3"></i>' +
+                '<h6>Нет разрешенных устройств</h6>' +
+                '<p class="text-muted">Добавьте устройства в белый список пользователя</p>' +
+            '</div>';
+    } else {
+        html += '<div class="table-responsive">' +
+                '<table class="table table-sm table-hover">' +
+                    '<thead>' +
+                        '<tr>' +
+                            '<th>Название</th>' +
+                            '<th>VID:PID</th>' +
+                            '<th>Serial</th>' +
+                            '<th>Дата добавления</th>' +
+                            '<th>Действия</th>' +
+                        '</tr>' +
+                    '</thead>' +
+                    '<tbody>';
+        
+        devices.forEach(function(device) {
+            const deviceId = device.vid + ':' + device.pid + (device.serial ? ':' + device.serial : '');
+            const deviceName = device.name || 'Unnamed Device';
+            const serial = device.serial || '-';
+            const addedDate = device.permission_created_at ? new Date(device.permission_created_at).toLocaleDateString() : '-';
+            
+            html += 
+                '<tr>' +
+                    '<td>' +
+                        '<i class="fab fa-usb text-primary me-2"></i>' +
+                        '<strong>' + escapeHtml(deviceName) + '</strong>' +
+                        (device.description ? '<br><small class="text-muted">' + escapeHtml(device.description) + '</small>' : '') +
+                    '</td>' +
+                    '<td><code>' + escapeHtml(device.vid) + ':' + escapeHtml(device.pid) + '</code></td>' +
+                    '<td><small>' + escapeHtml(serial) + '</small></td>' +
+                    '<td><small>' + addedDate + '</small></td>' +
+                    '<td>' +
+                        '<button type="button" class="btn btn-danger btn-sm" ' +
+                                'onclick="removeDeviceFromUser(\'' + escapeHtml(deviceId) + '\')">' +
+                            '<i class="fas fa-trash"></i>' +
+                        '</button>' +
+                    '</td>' +
+                '</tr>';
+        });
+        
+        html += '</tbody></table></div>';
+    }
+    
+    content.innerHTML = html;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function showAddDeviceModal() {
+    const modal = new bootstrap.Modal(document.getElementById('addDeviceModal'));
+    modal.show();
+}
+
+function addDeviceToUser() {
+    const vid = document.getElementById('deviceVid').value.trim();
+    const pid = document.getElementById('devicePid').value.trim();
+    const serial = document.getElementById('deviceSerial').value.trim();
+    const name = document.getElementById('deviceName').value.trim();
+    const description = document.getElementById('deviceDescription').value.trim();
+    
+    if (!vid || !pid) {
+        showNotification('Заполните обязательные поля VID и PID', 'danger');
+        return;
+    }
+    
+    // Валидация VID и PID
+    const hexPattern = /^[0-9a-fA-F]{4}$/;
+    if (!hexPattern.test(vid) || !hexPattern.test(pid)) {
+        showNotification('VID и PID должны быть 4-значными шестнадцатеричными числами', 'danger');
+        return;
+    }
+    
+    // Отключаем кнопку и показываем загрузку
+    const addBtn = document.getElementById('addDeviceBtn');
+    const originalText = addBtn.innerHTML;
+    addBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Добавление...';
+    addBtn.disabled = true;
+    
+    // Формируем device_id в формате VID:PID:SERIAL
+    const deviceId = vid + ':' + pid + (serial ? ':' + serial : '');
+    
+    // AJAX запрос для добавления устройства
+    fetch('/api/users/' + encodeURIComponent(currentUsername) + '/devices', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            device_id: deviceId,
+            name: name || 'Unnamed Device'
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            // Закрываем модальное окно
+            bootstrap.Modal.getInstance(document.getElementById('addDeviceModal')).hide();
+            
+            // Очищаем форму
+            document.getElementById('addDeviceForm').reset();
+            
+            // Показываем уведомление
+            showNotification('Устройство успешно добавлено в белый список', 'success');
+            
+            // Перезагружаем список устройств и обновляем счетчик
+            loadUserDevices(currentUserId);
+            loadUserDeviceCount(currentUserId);
+        } else {
+            showNotification('Ошибка при добавлении устройства: ' + (data.error || 'Неизвестная ошибка'), 'danger');
+        }
+    })
+    .catch(error => {
+        console.error('Error adding device:', error);
+        showNotification('Ошибка при добавлении устройства: ' + error.message, 'danger');
+    })
+    .finally(() => {
+        // Восстанавливаем кнопку
+        addBtn.innerHTML = originalText;
+        addBtn.disabled = false;
+    });
+}
+
+function removeDeviceFromUser(deviceId) {
+    if (confirm('Вы уверены, что хотите удалить это устройство из белого списка?')) {
+        // AJAX запрос для удаления устройства
+        fetch('/api/users/' + encodeURIComponent(currentUsername) + '/devices/' + encodeURIComponent(deviceId), {
+            method: 'DELETE',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                showNotification('Устройство удалено из белого списка', 'success');
+                loadUserDevices(currentUserId);
+                loadUserDeviceCount(currentUserId);
+            } else {
+                showNotification('Ошибка при удалении устройства: ' + (data.error || 'Неизвестная ошибка'), 'danger');
+            }
+        })
+        .catch(error => {
+            console.error('Error removing device:', error);
+            showNotification('Ошибка при удалении устройства: ' + error.message, 'danger');
+        });
+    }
+}
+
+function showNotification(message, type) {
+    const container = document.getElementById('notification-container');
+    const notification = document.createElement('div');
+    notification.className = 'alert alert-' + type + ' alert-dismissible fade show';
+    notification.innerHTML = 
+        message +
+        '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+    
+    container.appendChild(notification);
+    
+    // Автоматически удаляем через 5 секунд
+    setTimeout(function() {
+        if (notification.parentNode) {
+            notification.parentNode.removeChild(notification);
+        }
+    }, 5000);
+}
+</script>
+{% endblock %}

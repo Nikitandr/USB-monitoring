@@ -1,0 +1,311 @@
+{% extends "base.html" %}
+
+{% block title %}Панель управления - USB Monitor Admin{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1 class="h3 mb-4">
+            <i class="fas fa-tachometer-alt"></i> Панель управления
+        </h1>
+    </div>
+</div>
+
+<!-- Статистика -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card bg-primary text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.users or 0 }}</h4>
+                        <p class="card-text">Пользователи</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-users fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card bg-success text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.devices or 0 }}</h4>
+                        <p class="card-text">Устройства</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fab fa-usb fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card bg-info text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.permissions or 0 }}</h4>
+                        <p class="card-text">Разрешения</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-check-circle fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-3">
+        <div class="card bg-warning text-white">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <h4 class="card-title">{{ stats.pending_requests or 0 }}</h4>
+                        <p class="card-text">Ожидающие запросы</p>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-clock fa-2x"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Ожидающие запросы -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">
+                    <i class="fas fa-exclamation-circle text-warning"></i> 
+                    Ожидающие запросы на разрешения
+                </h5>
+                <span class="badge bg-warning">{{ requests|length }}</span>
+            </div>
+            <div class="card-body">
+                {% if requests %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Пользователь</th>
+                                <th>Устройство</th>
+                                <th>Время запроса</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pending-requests">
+                            {% for request in requests %}
+                            <tr id="request-{{ request.id }}">
+                                <td>{{ request.id }}</td>
+                                <td>
+                                    <i class="fas fa-user"></i> {{ request.username }}
+                                </td>
+                                <td>
+                                    <div>
+                                        <strong>{{ request.name or 'Неизвестное устройство' }}</strong>
+                                        <br>
+                                        <small class="text-muted">
+                                            VID: {{ request.vid }} | PID: {{ request.pid }}
+                                            {% if request.serial %}| Serial: {{ request.serial }}{% endif %}
+                                        </small>
+                                    </div>
+                                </td>
+                                <td>
+                                    <small>{{ request.created_at }}</small>
+                                </td>
+                                <td>
+                                    <div class="btn-group" role="group">
+                                        <button type="button" 
+                                                class="btn btn-success btn-sm approve-btn" 
+                                                data-request-id="{{ request.id }}">
+                                            <i class="fas fa-check"></i> Разрешить
+                                        </button>
+                                        <button type="button" 
+                                                class="btn btn-danger btn-sm deny-btn" 
+                                                data-request-id="{{ request.id }}">
+                                            <i class="fas fa-times"></i> Запретить
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <div class="text-center py-4">
+                    <i class="fas fa-check-circle fa-3x text-success mb-3"></i>
+                    <h5>Нет ожидающих запросов</h5>
+                    <p class="text-muted">Все запросы на подключение устройств обработаны</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно для подтверждения действий -->
+<div class="modal fade" id="confirmModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="confirmModalTitle">Подтверждение</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="confirmModalBody">
+                <!-- Содержимое будет заполнено через JavaScript -->
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Отмена</button>
+                <button type="button" class="btn btn-primary" id="confirmModalAction">Подтвердить</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentRequestId = null;
+let currentAction = null;
+
+// Add event listeners for approve and deny buttons
+document.addEventListener('DOMContentLoaded', function() {
+    // Event delegation for dynamically added buttons
+    document.addEventListener('click', function(e) {
+        if (e.target.closest('.approve-btn')) {
+            const requestId = e.target.closest('.approve-btn').getAttribute('data-request-id');
+            approveRequest(requestId);
+        } else if (e.target.closest('.deny-btn')) {
+            const requestId = e.target.closest('.deny-btn').getAttribute('data-request-id');
+            denyRequest(requestId);
+        }
+    });
+});
+
+function approveRequest(requestId) {
+    currentRequestId = requestId;
+    currentAction = 'approve';
+    
+    document.getElementById('confirmModalTitle').textContent = 'Разрешить устройство';
+    document.getElementById('confirmModalBody').innerHTML = 
+        '<p>Вы уверены, что хотите разрешить подключение этого устройства?</p>' +
+        '<p class="text-success"><i class="fas fa-info-circle"></i> Устройство будет добавлено в белый список пользователя.</p>';
+    
+    const actionBtn = document.getElementById('confirmModalAction');
+    actionBtn.textContent = 'Разрешить';
+    actionBtn.className = 'btn btn-success';
+    
+    new bootstrap.Modal(document.getElementById('confirmModal')).show();
+}
+
+function denyRequest(requestId) {
+    currentRequestId = requestId;
+    currentAction = 'deny';
+    
+    document.getElementById('confirmModalTitle').textContent = 'Запретить устройство';
+    document.getElementById('confirmModalBody').innerHTML = 
+        '<p>Вы уверены, что хотите запретить подключение этого устройства?</p>' +
+        '<p class="text-danger"><i class="fas fa-exclamation-triangle"></i> Запрос будет отклонен.</p>';
+    
+    const actionBtn = document.getElementById('confirmModalAction');
+    actionBtn.textContent = 'Запретить';
+    actionBtn.className = 'btn btn-danger';
+    
+    new bootstrap.Modal(document.getElementById('confirmModal')).show();
+}
+
+document.getElementById('confirmModalAction').addEventListener('click', function() {
+    if (currentRequestId && currentAction) {
+        processRequest(currentRequestId, currentAction);
+        bootstrap.Modal.getInstance(document.getElementById('confirmModal')).hide();
+    }
+});
+
+function processRequest(requestId, action) {
+    const url = '/api/requests/' + requestId + '/' + action;
+    
+    fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === (action + 'd')) {
+            // Удаляем строку из таблицы
+            const row = document.getElementById('request-' + requestId);
+            if (row) {
+                row.remove();
+            }
+            
+            // Показываем уведомление
+            showNotification(
+                (action === 'approve') ? 'Запрос одобрен' : 'Запрос отклонен',
+                (action === 'approve') ? 'success' : 'danger'
+            );
+            
+            // Обновляем счетчик
+            updatePendingCount();
+        } else {
+            showNotification('Ошибка обработки запроса', 'danger');
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showNotification('Ошибка сети', 'danger');
+    });
+}
+
+function updatePendingCount() {
+    const tbody = document.getElementById('pending-requests');
+    const count = tbody.children.length;
+    
+    // Обновляем badge в заголовке
+    const badge = document.querySelector('.card-header .badge');
+    if (badge) {
+        badge.textContent = count;
+    }
+    
+    // Если запросов нет, показываем сообщение
+    if (count === 0) {
+        tbody.innerHTML = 
+            '<tr>' +
+                '<td colspan="5" class="text-center py-4">' +
+                    '<i class="fas fa-check-circle fa-3x text-success mb-3"></i>' +
+                    '<h5>Нет ожидающих запросов</h5>' +
+                    '<p class="text-muted">Все запросы на подключение устройств обработаны</p>' +
+                '</td>' +
+            '</tr>';
+    }
+}
+
+function showNotification(message, type) {
+    const container = document.getElementById('notification-container');
+    const notification = document.createElement('div');
+    notification.className = 'alert alert-' + type + ' alert-dismissible fade show';
+    notification.innerHTML = 
+        message +
+        '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+    
+    container.appendChild(notification);
+    
+    // Автоматически удаляем через 5 секунд
+    setTimeout(function() {
+        if (notification.parentNode) {
+            notification.parentNode.removeChild(notification);
+        }
+    }, 5000);
+}
+</script>
+{% endblock %}

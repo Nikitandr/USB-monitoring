@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+
+{% block title %}История запросов - USB Monitor Admin{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1 class="h3 mb-4">
+            <i class="fas fa-clipboard-list"></i> История запросов
+        </h1>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">
+                    <i class="fas fa-history"></i> Все запросы на подключение устройств
+                </h5>
+                <span class="badge bg-info">{{ requests|length }}</span>
+            </div>
+            <div class="card-body">
+                {% if requests %}
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Пользователь</th>
+                                <th>Устройство</th>
+                                <th>Статус</th>
+                                <th>Время запроса</th>
+                                <th>Время обработки</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for request in requests %}
+                            <tr>
+                                <td>{{ request.id }}</td>
+                                <td>
+                                    <i class="fas fa-user"></i> {{ request.username }}
+                                </td>
+                                <td>
+                                    <div>
+                                        <strong>{{ request.name or 'Неизвестное устройство' }}</strong>
+                                        <br>
+                                        <small class="text-muted">
+                                            VID: {{ request.vid }} | PID: {{ request.pid }}
+                                            {% if request.serial %}| Serial: {{ request.serial }}{% endif %}
+                                        </small>
+                                        {% if request.device_info %}
+                                        <br>
+                                        <small class="text-info">{{ request.device_info }}</small>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                                <td>
+                                    {% if request.status == 'pending' %}
+                                        <span class="badge bg-warning">
+                                            <i class="fas fa-clock"></i> Ожидает
+                                        </span>
+                                    {% elif request.status == 'approved' %}
+                                        <span class="badge bg-success">
+                                            <i class="fas fa-check"></i> Одобрен
+                                        </span>
+                                    {% elif request.status == 'denied' %}
+                                        <span class="badge bg-danger">
+                                            <i class="fas fa-times"></i> Отклонен
+                                        </span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">{{ request.status }}</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <small>{{ request.created_at }}</small>
+                                </td>
+                                <td>
+                                    {% if request.processed_at %}
+                                        <small>{{ request.processed_at }}</small>
+                                    {% else %}
+                                        <small class="text-muted">-</small>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Пагинация (если потребуется) -->
+                <nav aria-label="Навигация по страницам">
+                    <ul class="pagination justify-content-center">
+                        <li class="page-item disabled">
+                            <span class="page-link">Предыдущая</span>
+                        </li>
+                        <li class="page-item active">
+                            <span class="page-link">1</span>
+                        </li>
+                        <li class="page-item disabled">
+                            <span class="page-link">Следующая</span>
+                        </li>
+                    </ul>
+                </nav>
+                
+                {% else %}
+                <div class="text-center py-4">
+                    <i class="fas fa-clipboard-list fa-3x text-muted mb-3"></i>
+                    <h5>Нет запросов</h5>
+                    <p class="text-muted">История запросов на подключение устройств пуста</p>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Фильтры и поиск -->
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0">
+                    <i class="fas fa-filter"></i> Фильтры и поиск
+                </h6>
+            </div>
+            <div class="card-body">
+                <form class="row g-3">
+                    <div class="col-md-3">
+                        <label for="filterUser" class="form-label">Пользователь</label>
+                        <input type="text" class="form-control" id="filterUser" placeholder="Имя пользователя">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="filterStatus" class="form-label">Статус</label>
+                        <select class="form-select" id="filterStatus">
+                            <option value="">Все статусы</option>
+                            <option value="pending">Ожидает</option>
+                            <option value="approved">Одобрен</option>
+                            <option value="denied">Отклонен</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="filterDateFrom" class="form-label">Дата от</label>
+                        <input type="date" class="form-control" id="filterDateFrom">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="filterDateTo" class="form-label">Дата до</label>
+                        <input type="date" class="form-control" id="filterDateTo">
+                    </div>
+                    <div class="col-12">
+                        <button type="button" class="btn btn-primary" onclick="applyFilters()">
+                            <i class="fas fa-search"></i> Применить фильтры
+                        </button>
+                        <button type="button" class="btn btn-secondary" onclick="clearFilters()">
+                            <i class="fas fa-times"></i> Очистить
+                        </button>
+                        <button type="button" class="btn btn-success" onclick="exportData()">
+                            <i class="fas fa-download"></i> Экспорт
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function applyFilters() {
+    const user = document.getElementById('filterUser').value.trim();
+    const status = document.getElementById('filterStatus').value;
+    const dateFrom = document.getElementById('filterDateFrom').value;
+    const dateTo = document.getElementById('filterDateTo').value;
+    
+    // Здесь будет логика фильтрации
+    console.log('Applying filters:', { user, status, dateFrom, dateTo });
+    
+    // Пока просто показываем уведомление
+    showNotification('Фильтры применены', 'info');
+}
+
+function clearFilters() {
+    document.getElementById('filterUser').value = '';
+    document.getElementById('filterStatus').value = '';
+    document.getElementById('filterDateFrom').value = '';
+    document.getElementById('filterDateTo').value = '';
+    
+    showNotification('Фильтры очищены', 'info');
+}
+
+function exportData() {
+    // Здесь будет логика экспорта данных
+    console.log('Exporting data...');
+    
+    showNotification('Экспорт данных начат', 'info');
+}
+
+function showNotification(message, type) {
+    const container = document.getElementById('notification-container');
+    const notification = document.createElement('div');
+    notification.className = 'alert alert-' + type + ' alert-dismissible fade show';
+    notification.innerHTML = 
+        message +
+        '<button type="button" class="btn-close" data-bs-dismiss="alert"></button>';
+    
+    container.appendChild(notification);
+    
+    // Автоматически удаляем через 5 секунд
+    setTimeout(function() {
+        if (notification.parentNode) {
+            notification.remove();
+        }
+    }, 5000);
+}
+</script>
+{% endblock %}

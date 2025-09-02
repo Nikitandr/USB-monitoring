@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+import pyudev
+import yaml
+import os
+import sys
+from pydbus import SystemBus
+from gi.repository import GLib
+import subprocess
+import requests
+import json
+import time
+import urllib3
+
+# UDisks2 D-Bus константы
+UDISKS_BUS_NAME     = 'org.freedesktop.UDisks2'
+UDISKS_OBJ_MANAGER  = '/org/freedesktop/UDisks2'
+BLOCK_IFACE         = 'org.freedesktop.UDisks2.Block'
+FS_IFACE            = 'org.freedesktop.UDisks2.Filesystem'
+
+# Путь к конфигу
+CONFIG_PATH = '/etc/usb-monitor/config.yaml' if os.path.exists('/etc/usb-monitor/config.yaml') else os.path.join(os.path.dirname(__file__), 'config.yaml')
+
+# Конфигурация сервера по умолчанию
+DEFAULT_SERVER_CONFIG = {
+    'server_url': 'https://localhost:443',
+    'timeout': 10,
+    'retry_attempts': 3,
+    'retry_delay': 5,
+    'cache_duration': 300,  # 5 минут
+    'ssl_verify': False,    # Для самоподписанных сертификатов
+    'ssl_warnings': False   # Отключаем SSL предупреждения
+}
+
+# Глобальные переменные для кэширования
+_device_cache = {}
+_cache_timestamps = {}
+_pending_requests = {}
+
+def check_root():
+    if os.geteuid() != 0:
+        print("Ошибка: этот скрипт нужно запускать от root (sudo).", file=sys.stderr)
+        sys.exit(1)
+
+def load_config():
+    """Загружает конфигурацию клиента"""
+    try:
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            cfg = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        cfg = {}
+    
+    # Объединяем с настройками по умолчанию
+    server_config = DEFAULT_SERVER_CONFIG.copy()
+    server_config.update(cfg.get('server', {}))
+    
+    return {
+        'server': server_config
+    }
+
+def log_message(level, message):
+    """Логирование сообщений для демона"""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {level}: {message}", file=sys.stderr if level == 'ERROR' else sys.stdout)
+
+def check_device_permission_server(username, vid, pid, serial, server_config):
+    """Проверяет разрешение устройства через сервер API"""
+    device_key = f"{username}:{vid}:{pid}:{serial}"
+    current_time = time.time()
+    
+    # Проверяем кэш
+    if device_key in _device_cache:
+        cache_time = _cache_timestamps.get(device_key, 0)
+        if current_time - cache_time < server_config['cache_duration']:
+            log_message('DEBUG', f"Используем кэшированный результат для {device_key}")
+            return _device_cache[device_key]
+    
+    # Настройка SSL предупреждений
+    if not server_config.get('ssl_warnings', True):
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    # Делаем запрос к серверу
+    url = f"{server_config['server_url']}/api/devices/check"
+    data = {
+        'username': username,
+        'vid': vid,
+        'pid': pid,
+        'serial': serial
+    }
+    
+    # Настройки SSL для requests
+    ssl_verify = server_config.get('ssl_verify', True)
+    
+    for attempt in range(server_config['retry_attempts']):
+        try:
+            log_message('DEBUG', f"Запрос к серверу (попытка {attempt + 1}): {url}")
+            response = requests.post(
+                url, 
+                json=data, 
+                timeout=server_config['timeout'],
+                verify=ssl_verify
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                status = result.get('status', 'unknown')
+                
+                # Кэшируем результат
+                _device_cache[device_key] = status
+                _cache_timestamps[device_key] = current_time
+                
+                log_message('INFO', f"Сервер ответил: {status} для {device_key}")
+                return status
+            else:
+                log_message('ERROR', f"Сервер вернул код {response.status_code}")
+                
+        except requests.exceptions.RequestException as e:
+            log_message('ERROR', f"Ошибка соединения с сервером (попытка {attempt + 1}): {e}")
+            
+        if attempt < server_config['retry_attempts'] - 1:
+            time.sleep(server_config['retry_delay'])
+    
+    log_message('ERROR', f"Не удалось связаться с сервером после {server_config['retry_attempts']} попыток")
+    return None
+
+def create_device_request(username, vid, pid, serial, device_info, server_config):
+    """Создает запрос на разрешение устройства"""
+    device_key = f"{username}:{vid}:{pid}:{serial}"
+    
+    # Проверяем, нет ли уже ожидающего запроса
+    if device_key in _pending_requests:
+        log_message('INFO', f"Запрос для {device_key} уже отправлен, ожидаем ответа")
+        return _pending_requests[device_key]
+    
+    # Настройка SSL предупреждений
+    if not server_config.get('ssl_warnings', True):
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    url = f"{server_config['server_url']}/api/requests"
+    data = {
+        'username': username,
+        'vid': vid,
+        'pid': pid,
+        'serial': serial,
+        'device_info': device_info
+    }
+    
+    # Настройки SSL для requests
+    ssl_verify = server_config.get('ssl_verify', True)
+    
+    try:
+        log_message('INFO', f"Отправляем запрос администратору для {device_key}")
+        response = requests.post(
+            url, 
+            json=data, 
+            timeout=server_config['timeout'],
+            verify=ssl_verify
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            request_id = result.get('request_id')
+            
+            # Сохраняем ID запроса
+            _pending_requests[device_key] = request_id
+            
+            log_message('INFO', f"Запрос создан с ID {request_id}")
+            return request_id
+        else:
+            log_message('ERROR', f"Ошибка создания запроса: {response.status_code}")
+            
+    except requests.exceptions.RequestException as e:
+        log_message('ERROR', f"Ошибка отправки запроса: {e}")
+    
+    return None
+
+def check_device_policy(username, vid, pid, serial, device_info, cfg):
+    """Основная функция проверки политики устройства"""
+    server_config = cfg['server']
+    
+    # Пытаемся проверить через сервер
+    server_result = check_device_permission_server(username, vid, pid, serial, server_config)
+    
+    if server_result is not None:
+        if server_result == 'unknown':
+            # Создаем запрос администратору
+            create_device_request(username, vid, pid, serial, device_info, server_config)
+            return 'unknown'
+        return server_result
+    
+    # Если сервер недоступен - всегда блокируем устройства
+    # Это обеспечивает безопасность: без связи с сервером никакие устройства не разрешаются
+    log_message('WARNING', "Сервер недоступен - блокируем все USB устройства для безопасности")
+    return 'deny'
+
+def find_fs_object_path(bus, device_node):
+    om = bus.get(UDISKS_BUS_NAME, UDISKS_OBJ_MANAGER)
+    objects = om.GetManagedObjects()
+    for obj_path, ifaces in objects.items():
+        block = ifaces.get(BLOCK_IFACE)
+        fs    = ifaces.get(FS_IFACE)
+        if not block or not fs:
+            continue
+        # block.device — байтовый массив с '\x00' на конце
+        dev = bytes(block.get('Device')).rstrip(b'\x00').decode()
+        if dev == device_node:
+            return obj_path
+    return None
+
+def get_active_user():
+    """
+    Определяет активного пользователя с использованием нескольких методов fallback.
+    Возвращает имя пользователя или None, если не удалось определить.
+    """
+    # Метод 1: loginctl (основной)
+    user = _get_user_via_loginctl()
+    if user:
+        return user
+    
+    # Метод 2: who команда
+    user = _get_user_via_who()
+    if user:
+        return user
+    
+    # Метод 3: анализ X11 сессий
+    user = _get_user_via_x11()
+    if user:
+        return user
+    
+    # Метод 4: проверка /proc/*/environ для графических процессов
+    user = _get_user_via_proc()
+    if user:
+        return user
+    
+    return None
+
+def _get_user_via_loginctl():
+    """Определение пользователя через loginctl"""
+    try:
+        out = subprocess.check_output(
+            ["loginctl", "list-sessions", "--no-legend"],
+            stderr=subprocess.DEVNULL
+        ).decode('utf-8')
+    except subprocess.CalledProcessError:
+        return None
+
+    for line in out.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        session_id = parts[0]
+
+        try:
+            info = subprocess.check_output(
+                ["loginctl", "show-session", session_id, "-p", "Name", "-p", "State", "-p", "Seat", "-p", "Type"],
+                stderr=subprocess.DEVNULL
+            ).decode('utf-8')
+        except subprocess.CalledProcessError:
+            continue
+
+        user = None
+        state = None
+        seat = None
+        session_type = None
+
+        for kv in info.splitlines():
+            if kv.startswith("Name="):
+                user = kv.split("=", 1)[1].strip()
+            elif kv.startswith("State="):
+                state = kv.split("=", 1)[1].strip()
+            elif kv.startswith("Seat="):
+                seat = kv.split("=", 1)[1].strip()
+            elif kv.startswith("Type="):
+                session_type = kv.split("=", 1)[1].strip()
+
+        # Приоритет: активная графическая сессия на seat0
+        if (seat == "seat0" and state == "active" and 
+            session_type in ["x11", "wayland", "tty"] and user):
+            return user
+
+    return None
+
+def _get_user_via_who():
+    """Определение пользователя через команду who"""
+    try:
+        out = subprocess.check_output(["who"], stderr=subprocess.DEVNULL).decode('utf-8')
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                user = parts[0]
+                terminal = parts[1]
+                # Ищем пользователей на графических терминалах
+                if terminal.startswith((':0', 'tty7', 'tty1')) and user != 'root':
+                    return user
+    except subprocess.CalledProcessError:
+        pass
+    return None
+
+def _get_user_via_x11():
+    """Определение пользователя через анализ X11 процессов"""
+    try:
+        # Ищем процессы X сервера
+        out = subprocess.check_output(
+            ["ps", "aux"], stderr=subprocess.DEVNULL
+        ).decode('utf-8')
+        
+        for line in out.splitlines():
+            if '/usr/bin/X' in line or 'Xorg' in line:
+                parts = line.split()
+                if len(parts) > 0:
+                    user = parts[0]
+                    if user != 'root':
+                        return user
+    except subprocess.CalledProcessError:
+        pass
+    return None
+
+def _get_user_via_proc():
+    """Определение пользователя через анализ /proc для графических процессов"""
+    try:
+        # Ищем процессы с DISPLAY переменной
+        for proc_dir in os.listdir('/proc'):
+            if not proc_dir.isdigit():
+                continue
+            
+            try:
+                environ_path = f'/proc/{proc_dir}/environ'
+                if os.path.exists(environ_path):
+                    with open(environ_path, 'rb') as f:
+                        environ_data = f.read().decode('utf-8', errors='ignore')
+                        
+                    if 'DISPLAY=' in environ_data:
+                        # Получаем владельца процесса
+                        stat_path = f'/proc/{proc_dir}/stat'
+                        if os.path.exists(stat_path):
+                            stat_info = os.stat(stat_path)
+                            uid = stat_info.st_uid
+                            
+                            # Конвертируем UID в имя пользователя
+                            import pwd
+                            try:
+                                user_info = pwd.getpwuid(uid)
+                                user = user_info.pw_name
+                                if user != 'root':
+                                    return user
+                            except KeyError:
+                                continue
+            except (OSError, IOError, PermissionError):
+                continue
+    except OSError:
+        pass
+    return None
+
+def mount_device(device_node):
+    bus = SystemBus()
+    obj_path = find_fs_object_path(bus, device_node)
+    if not obj_path:
+        print("    ! Не найден объект UDisks2 для монтирования")
+        return
+
+    # Получаем имя активного пользователя
+    user = get_active_user()
+    print(user)
+    if not user:
+        print("    ! Не удалось определить активного пользователя; монтируем под /media/root")
+        mount_base = "/media/root"
+    else:
+        mount_base = f"/media/{user}"
+
+    # Убедимся, что базовая папка существует (если нужно создаём её)
+    if not os.path.isdir(mount_base):
+        try:
+            os.makedirs(mount_base, exist_ok=True)
+            # Устанавливаем владельца каталога на нужного пользователя
+            subprocess.run(["chown", f"{user}:{user}", mount_base], check=False)
+        except Exception as e:
+            print(f"    ! Не удалось создать или назначить {mount_base}: {e}")
+
+    fs = bus.get(UDISKS_BUS_NAME, obj_path)[FS_IFACE]
+    options = GLib.Variant('as', ['rw','nosuid','nodev'])
+    try:
+        target = fs.Mount({'options': options})
+        print(f"    → Смонтировано в: {target}")
+    except Exception as e:
+        print(f"    ! Ошибка монтирования: {e}")
+
+def send_desktop_notification(username, title, message):
+    """Отправляет уведомление пользователю"""
+    try:
+        # Получаем DISPLAY для пользователя
+        display = None
+        for proc_dir in os.listdir('/proc'):
+            if not proc_dir.isdigit():
+                continue
+            try:
+                environ_path = f'/proc/{proc_dir}/environ'
+                if os.path.exists(environ_path):
+                    with open(environ_path, 'rb') as f:
+                        environ_data = f.read().decode('utf-8', errors='ignore')
+                    
+                    if 'DISPLAY=' in environ_data and f'USER={username}' in environ_data:
+                        for line in environ_data.split('\0'):
+                            if line.startswith('DISPLAY='):
+                                display = line.split('=', 1)[1]
+                                break
+                        if display:
+                            break
+            except (OSError, IOError, PermissionError):
+                continue
+        
+        if display:
+            # Отправляем уведомление через notify-send
+            env = os.environ.copy()
+            env['DISPLAY'] = display
+            subprocess.run([
+                'sudo', '-u', username, 'notify-send', 
+                '--urgency=normal', 
+                '--expire-time=5000',
+                title, message
+            ], env=env, check=False)
+            log_message('DEBUG', f"Уведомление отправлено пользователю {username}")
+        else:
+            log_message('WARNING', f"Не удалось найти DISPLAY для пользователя {username}")
+            
+    except Exception as e:
+        log_message('ERROR', f"Ошибка отправки уведомления: {e}")
+
+def main():
+    check_root()
+    
+    log_message('INFO', "Запуск USB Monitor Client")
+
+    # udev-мониторинг блочных устройств
+    context = pyudev.Context()
+    monitor = pyudev.Monitor.from_netlink(context)
+    monitor.filter_by(subsystem='block')
+
+    log_message('INFO', "Мониторинг USB-событий запущен")
+    cfg = load_config()
+    
+    log_message('INFO', f"Сервер: {cfg['server']['server_url']}")
+    log_message('INFO', f"Таймаут: {cfg['server']['timeout']}с, попыток: {cfg['server']['retry_attempts']}")
+
+    for action, device in monitor:
+        if action != 'add':
+            continue
+
+        # Фильтруем только USB-блочные с файловой системой
+        if device.get('ID_BUS') != 'usb' or not device.get('ID_FS_TYPE'):
+            continue
+
+        # Обрабатываем и диски, и разделы
+        if device.get('DEVTYPE') not in ('disk', 'partition'):
+            continue
+
+        # Получаем активного пользователя
+        username = get_active_user()
+        if not username:
+            log_message('WARNING', "Не удалось определить активного пользователя, пропускаем устройство")
+            continue
+
+        vid = device.get('ID_VENDOR_ID', 'unknown')
+        pid = device.get('ID_MODEL_ID', 'unknown')
+        serial = device.get('ID_SERIAL_SHORT', '')
+        
+        # Формируем информацию об устройстве
+        device_info = {
+            'vendor': device.get('ID_VENDOR', 'Unknown'),
+            'model': device.get('ID_MODEL', 'Unknown'),
+            'fs_type': device.get('ID_FS_TYPE', 'Unknown'),
+            'fs_label': device.get('ID_FS_LABEL', ''),
+            'device_node': device.device_node
+        }
+        
+        device_info_str = f"{device_info['vendor']} {device_info['model']} ({device_info['fs_type']})"
+        log_info = f"VID:PID={vid}:{pid}, Serial={serial or 'n/a'}, User={username}"
+        
+        log_message('INFO', f"USB устройство подключено: {log_info}")
+        log_message('DEBUG', f"Информация об устройстве: {device_info_str}")
+
+        # Проверяем политику через сервер
+        policy = check_device_policy(username, vid, pid, serial, device_info_str, cfg)
+
+        if policy == 'allow':
+            log_message('INFO', f"Устройство разрешено: {log_info}")
+            send_desktop_notification(
+                username, 
+                "USB устройство подключено", 
+                f"Устройство {device_info_str} успешно подключено"
+            )
+            mount_device(device.device_node)
+            
+        elif policy == 'deny':
+            log_message('WARNING', f"Устройство запрещено: {log_info}")
+            send_desktop_notification(
+                username, 
+                "USB устройство заблокировано", 
+                f"Устройство {device_info_str} заблокировано политикой безопасности"
+            )
+            
+        else:  # unknown
+            log_message('INFO', f"Неизвестное устройство, запрос отправлен администратору: {log_info}")
+            send_desktop_notification(
+                username, 
+                "USB устройство ожидает разрешения", 
+                f"Устройство {device_info_str} ожидает разрешения администратора"
+            )
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nЗавершение работы.")

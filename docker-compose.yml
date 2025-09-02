@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  usb-monitor-server:
+    build: 
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: usb-monitor-server
+    ports:
+      - "443:443"
+    volumes:
+      - ./data:/app/data
+      - ./server/certs:/app/certs:ro
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_PATH=/app/data/usb_monitor.db
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=admin123
+      - SSL_ENABLED=true
+      - SSL_CERT_PATH=/app/certs/server.crt
+      - SSL_KEY_PATH=/app/certs/server.key
+    restart: unless-stopped
+    networks:
+      - usb-monitor-network
+
+networks:
+  usb-monitor-network:
+    driver: bridge
+
+volumes:
+  usb-monitor-data:
