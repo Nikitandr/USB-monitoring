@@ -367,9 +367,20 @@ def mount_device(device_node):
         log_message('WARNING', "Не удалось определить активного пользователя; монтируем под /media/root")
         mount_base = "/media/root"
         target_user = "root"
+        uid = 0
+        gid = 0
     else:
         mount_base = f"/media/{user}"
         target_user = user
+        try:
+            import pwd
+            user_info = pwd.getpwnam(target_user)
+            uid = user_info.pw_uid
+            gid = user_info.pw_gid
+        except KeyError:
+            log_message('ERROR', f"Пользователь {target_user} не найден")
+            uid = 0
+            gid = 0
 
     # Убедимся, что базовая папка существует
     if not os.path.isdir(mount_base):
@@ -381,36 +392,62 @@ def mount_device(device_node):
         except Exception as e:
             log_message('ERROR', f"Не удалось создать или назначить {mount_base}: {e}")
 
+    # Получаем информацию о блочном устройстве для создания уникального имени папки
+    try:
+        block = bus.get(UDISKS_BUS_NAME, obj_path)[BLOCK_IFACE]
+        fs_label = block.get('IdLabel', '')
+        fs_uuid = block.get('IdUUID', '')
+        
+        # Создаем имя папки монтирования
+        if fs_label:
+            mount_name = fs_label
+        elif fs_uuid:
+            mount_name = fs_uuid[:8]  # Первые 8 символов UUID
+        else:
+            mount_name = os.path.basename(device_node)
+            
+        mount_point = os.path.join(mount_base, mount_name)
+        
+        # Создаем точку монтирования
+        if not os.path.exists(mount_point):
+            os.makedirs(mount_point, exist_ok=True)
+            if target_user != "root":
+                subprocess.run(["chown", f"{target_user}:{target_user}", mount_point], check=False)
+                
+    except Exception as e:
+        log_message('ERROR', f"Ошибка создания точки монтирования: {e}")
+        return
+
     fs = bus.get(UDISKS_BUS_NAME, obj_path)[FS_IFACE]
     
-    # Монтируем с указанием владельца
-    if target_user != "root":
-        # Получаем UID пользователя
-        try:
-            import pwd
-            user_info = pwd.getpwnam(target_user)
-            uid = user_info.pw_uid
-            gid = user_info.pw_gid
-            
-            # Опции монтирования с указанием владельца
-            options = GLib.Variant('as', [
-                'rw', 'nosuid', 'nodev', 'relatime',
-                f'uid={uid}', f'gid={gid}', 'umask=0022'
-            ])
-        except KeyError:
-            log_message('ERROR', f"Пользователь {target_user} не найден")
-            options = GLib.Variant('as', ['rw','nosuid','nodev'])
-    else:
-        options = GLib.Variant('as', ['rw','nosuid','nodev'])
+    # Опции монтирования с указанием конкретной точки монтирования
+    mount_options = {
+        'fstype': GLib.Variant('s', ''),  # Автоопределение
+        'options': GLib.Variant('s', f'rw,nosuid,nodev,uid={uid},gid={gid},umask=0022')
+    }
     
     try:
-        target = fs.Mount({'options': options})
+        # Монтируем в указанную точку
+        target = fs.Mount(mount_options)
         log_message('INFO', f"Устройство смонтировано в: {target}")
         
-        # Дополнительно устанавливаем права на точку монтирования
-        if target_user != "root" and os.path.exists(target):
-            subprocess.run(["chown", f"{target_user}:{target_user}", target], check=False)
-            subprocess.run(["chmod", "755", target], check=False)
+        # Если UDisks2 все равно смонтировал не туда, пробуем перемонтировать
+        if target != mount_point and target_user != "root":
+            log_message('INFO', f"Перемонтируем из {target} в {mount_point}")
+            try:
+                # Размонтируем
+                fs.Unmount({})
+                # Монтируем вручную через mount команду
+                subprocess.run([
+                    'mount', '-o', f'rw,nosuid,nodev,uid={uid},gid={gid},umask=0022',
+                    device_node, mount_point
+                ], check=True)
+                log_message('INFO', f"Устройство перемонтировано в: {mount_point}")
+            except Exception as e:
+                log_message('ERROR', f"Ошибка перемонтирования: {e}")
+                # Оставляем как есть, но меняем права
+                if os.path.exists(target):
+                    subprocess.run(["chown", "-R", f"{target_user}:{target_user}", target], check=False)
             
     except Exception as e:
         log_message('ERROR', f"Ошибка монтирования: {e}")
@@ -461,9 +498,9 @@ def send_desktop_notification(username, title, message):
                 else:
                     env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
                 
-                # Отправляем уведомление без sudo, используя runuser
+                # Отправляем уведомление используя su
                 subprocess.run([
-                    'runuser', '-l', username, '-c', 
+                    'su', '-', username, '-c', 
                     f'DISPLAY={display} notify-send --urgency=normal --expire-time=5000 "{title}" "{message}"'
                 ], env=env, check=False, timeout=10)
                 
