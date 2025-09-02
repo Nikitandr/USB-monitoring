@@ -395,8 +395,24 @@ def mount_device(device_node):
     # Получаем информацию о блочном устройстве для создания уникального имени папки
     try:
         block = bus.get(UDISKS_BUS_NAME, obj_path)[BLOCK_IFACE]
-        fs_label = block.get('IdLabel', '')
-        fs_uuid = block.get('IdUUID', '')
+        
+        # Правильный способ получения свойств D-Bus объекта
+        fs_label = ''
+        fs_uuid = ''
+        
+        try:
+            # Пробуем получить метку файловой системы
+            if hasattr(block, 'IdLabel'):
+                fs_label = block.IdLabel or ''
+        except:
+            pass
+            
+        try:
+            # Пробуем получить UUID файловой системы
+            if hasattr(block, 'IdUUID'):
+                fs_uuid = block.IdUUID or ''
+        except:
+            pass
         
         # Создаем имя папки монтирования
         if fs_label:
