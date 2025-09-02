@@ -104,9 +104,13 @@ def check_device_permission_server(username, vid, pid, serial, server_config):
                 result = response.json()
                 status = result.get('status', 'unknown')
                 
-                # Кэшируем результат
-                _device_cache[device_key] = status
-                _cache_timestamps[device_key] = current_time
+                # Кэшируем результат только для allow/deny, но не для unknown
+                if status in ['allow', 'deny']:
+                    _device_cache[device_key] = status
+                    _cache_timestamps[device_key] = current_time
+                    # Очищаем ожидающий запрос, если устройство получило окончательный статус
+                    if device_key in _pending_requests:
+                        del _pending_requests[device_key]
                 
                 log_message('INFO', f"Сервер ответил: {status} для {device_key}")
                 return status
