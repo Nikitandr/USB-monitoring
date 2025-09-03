@@ -436,26 +436,57 @@ def mount_device(device_node):
             # Опции для root монтирования
             mount_options = 'rw,nosuid,nodev'
         
-        # Выполняем монтирование
-        subprocess.run([
-            'mount', '-o', mount_options, device_node, mount_point
-        ], check=True)
+        # Подготавливаем команду монтирования
+        mount_cmd = ['mount', '-o', mount_options, device_node, mount_point]
         
-        log_message('INFO', f"Устройство {device_node} успешно смонтировано в: {mount_point}")
+        # Детальное логирование перед выполнением
+        log_message('DEBUG', f"Выполняем команду монтирования: {' '.join(mount_cmd)}")
+        log_message('DEBUG', f"Рабочая директория: {os.getcwd()}")
+        log_message('DEBUG', f"Устройство существует: {os.path.exists(device_node)}")
+        log_message('DEBUG', f"Точка монтирования существует: {os.path.exists(mount_point)}")
+        log_message('DEBUG', f"Права на точку монтирования: {oct(os.stat(mount_point).st_mode)[-3:] if os.path.exists(mount_point) else 'N/A'}")
         
-        # Дополнительно устанавливаем права на точку монтирования
-        if target_user != "root":
-            subprocess.run(["chown", f"{target_user}:{target_user}", mount_point], check=False)
-            subprocess.run(["chmod", "755", mount_point], check=False)
+        # Выполняем монтирование с захватом stderr
+        result = subprocess.run(
+            mount_cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        # Логируем результат выполнения
+        log_message('DEBUG', f"Код возврата mount: {result.returncode}")
+        if result.stdout:
+            log_message('DEBUG', f"STDOUT mount: {result.stdout.strip()}")
+        if result.stderr:
+            log_message('DEBUG', f"STDERR mount: {result.stderr.strip()}")
+        
+        # Проверяем успешность монтирования
+        if result.returncode == 0:
+            # Проверяем, действительно ли устройство смонтировано
+            mount_check = subprocess.run(['mount'], capture_output=True, text=True)
+            if device_node in mount_check.stdout:
+                log_message('INFO', f"Устройство {device_node} успешно смонтировано в: {mount_point}")
+                
+                # Дополнительно устанавливаем права на точку монтирования
+                if target_user != "root":
+                    subprocess.run(["chown", f"{target_user}:{target_user}", mount_point], check=False)
+                    subprocess.run(["chmod", "755", mount_point], check=False)
+            else:
+                log_message('ERROR', f"Команда mount завершилась успешно, но устройство не найдено в списке смонтированных")
+        else:
+            log_message('ERROR', f"Ошибка монтирования {device_node}: код возврата {result.returncode}")
+            if result.stderr:
+                log_message('ERROR', f"Детали ошибки: {result.stderr.strip()}")
             
-    except subprocess.CalledProcessError as e:
-        log_message('ERROR', f"Ошибка монтирования {device_node}: {e}")
-        # Удаляем созданную точку монтирования при ошибке
-        try:
-            if os.path.exists(mount_point) and os.path.isdir(mount_point):
-                os.rmdir(mount_point)
-        except:
-            pass
+            # Удаляем созданную точку монтирования при ошибке
+            try:
+                if os.path.exists(mount_point) and os.path.isdir(mount_point):
+                    os.rmdir(mount_point)
+                    log_message('DEBUG', f"Удалена неиспользуемая точка монтирования: {mount_point}")
+            except Exception as cleanup_error:
+                log_message('WARNING', f"Не удалось удалить точку монтирования: {cleanup_error}")
+            
     except Exception as e:
         log_message('ERROR', f"Неожиданная ошибка при монтировании: {e}")
 
