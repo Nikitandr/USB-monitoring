@@ -471,11 +471,12 @@ def mount_device(device_node):
             # Опции для root монтирования
             mount_options = 'rw,nosuid,nodev'
         
-        # Используем полный путь к mount для избежания проблем с PATH
-        mount_cmd = ['/bin/mount', '-o', mount_options, device_node, mount_point]
+        # Используем nsenter для монтирования в основном namespace (PID 1)
+        # Это обходит изоляцию mount namespace в systemd
+        mount_cmd = ['/usr/bin/nsenter', '-t', '1', '-m', '/bin/mount', '-o', mount_options, device_node, mount_point]
         
         # Детальное логирование перед выполнением
-        log_message('DEBUG', f"Выполняем команду монтирования: {' '.join(mount_cmd)}")
+        log_message('DEBUG', f"Выполняем команду монтирования через nsenter: {' '.join(mount_cmd)}")
         log_message('DEBUG', f"Рабочая директория: {os.getcwd()}")
         log_message('DEBUG', f"Устройство существует: {os.path.exists(device_node)}")
         log_message('DEBUG', f"Точка монтирования существует: {os.path.exists(mount_point)}")
