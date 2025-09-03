@@ -14,16 +14,16 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=usb-monitor
 
-# Безопасность
+# Безопасность (ослаблены ограничения для монтирования)
 NoNewPrivileges=true
-ProtectHome=true
-ReadWritePaths=/media /var/log /tmp
-PrivateTmp=true
-ProtectKernelTunables=true
+ProtectHome=false
+ReadWritePaths=/media /var/log /tmp /proc /sys /dev
+PrivateTmp=false
+ProtectKernelTunables=false
 ProtectKernelModules=true
-ProtectControlGroups=true
+ProtectControlGroups=false
 RestrictRealtime=true
-RestrictNamespaces=true
+RestrictNamespaces=false
 
 # Переменные окружения
 Environment=PYTHONUNBUFFERED=1

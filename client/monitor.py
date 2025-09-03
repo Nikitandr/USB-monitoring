@@ -354,7 +354,33 @@ def _get_user_via_proc():
         pass
     return None
 
+def wait_for_device_ready(device_node, timeout=10):
+    """Ожидает готовности устройства к монтированию"""
+    log_message('DEBUG', f"Ожидаем готовности устройства {device_node}")
+    
+    for attempt in range(timeout):
+        try:
+            # Проверяем, что устройство существует и доступно для чтения
+            if os.path.exists(device_node) and os.access(device_node, os.R_OK):
+                # Пытаемся прочитать первые байты устройства
+                with open(device_node, 'rb') as f:
+                    f.read(512)  # Читаем первый сектор
+                log_message('DEBUG', f"Устройство {device_node} готово к монтированию")
+                return True
+        except (OSError, IOError) as e:
+            log_message('DEBUG', f"Устройство {device_node} не готово (попытка {attempt + 1}): {e}")
+        
+        time.sleep(1)
+    
+    log_message('WARNING', f"Устройство {device_node} не готово после {timeout} секунд ожидания")
+    return False
+
 def mount_device(device_node):
+    # Ждем готовности устройства
+    if not wait_for_device_ready(device_node):
+        log_message('ERROR', f"Устройство {device_node} не готово к монтированию")
+        return
+
     # Получаем имя активного пользователя
     user = get_active_user()
     if not user:
@@ -382,14 +408,14 @@ def mount_device(device_node):
             os.makedirs(mount_base, exist_ok=True)
             # Устанавливаем владельца каталога на нужного пользователя
             if target_user != "root":
-                subprocess.run(["chown", f"{target_user}:{target_user}", mount_base], check=False)
+                subprocess.run(["/bin/chown", f"{target_user}:{target_user}", mount_base], check=False)
         except Exception as e:
             log_message('ERROR', f"Не удалось создать или назначить {mount_base}: {e}")
 
     # Получаем информацию об устройстве для создания уникального имени папки
     try:
         # Используем blkid для получения информации о файловой системе
-        blkid_output = subprocess.check_output(['blkid', device_node], stderr=subprocess.DEVNULL).decode('utf-8')
+        blkid_output = subprocess.check_output(['/sbin/blkid', device_node], stderr=subprocess.DEVNULL).decode('utf-8')
         
         fs_label = ''
         fs_uuid = ''
@@ -421,10 +447,19 @@ def mount_device(device_node):
         if not os.path.exists(mount_point):
             os.makedirs(mount_point, exist_ok=True)
             if target_user != "root":
-                subprocess.run(["chown", f"{target_user}:{target_user}", mount_point], check=False)
+                subprocess.run(["/bin/chown", f"{target_user}:{target_user}", mount_point], check=False)
     except Exception as e:
         log_message('ERROR', f"Ошибка создания точки монтирования {mount_point}: {e}")
         return
+
+    # Проверяем, не смонтировано ли уже устройство
+    try:
+        mount_check = subprocess.run(['/bin/mount'], capture_output=True, text=True)
+        if device_node in mount_check.stdout:
+            log_message('INFO', f"Устройство {device_node} уже смонтировано")
+            return
+    except subprocess.CalledProcessError:
+        pass
 
     # Монтируем устройство напрямую через mount команду
     # Это обходит polkit ограничения, так как выполняется от root
@@ -436,8 +471,8 @@ def mount_device(device_node):
             # Опции для root монтирования
             mount_options = 'rw,nosuid,nodev'
         
-        # Подготавливаем команду монтирования
-        mount_cmd = ['mount', '-o', mount_options, device_node, mount_point]
+        # Используем полный путь к mount для избежания проблем с PATH
+        mount_cmd = ['/bin/mount', '-o', mount_options, device_node, mount_point]
         
         # Детальное логирование перед выполнением
         log_message('DEBUG', f"Выполняем команду монтирования: {' '.join(mount_cmd)}")
@@ -446,12 +481,17 @@ def mount_device(device_node):
         log_message('DEBUG', f"Точка монтирования существует: {os.path.exists(mount_point)}")
         log_message('DEBUG', f"Права на точку монтирования: {oct(os.stat(mount_point).st_mode)[-3:] if os.path.exists(mount_point) else 'N/A'}")
         
+        # Настраиваем окружение с полным PATH
+        env = os.environ.copy()
+        env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        
         # Выполняем монтирование с захватом stderr
         result = subprocess.run(
             mount_cmd,
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            env=env
         )
         
         # Логируем результат выполнения
@@ -463,17 +503,64 @@ def mount_device(device_node):
         
         # Проверяем успешность монтирования
         if result.returncode == 0:
-            # Проверяем, действительно ли устройство смонтировано
-            mount_check = subprocess.run(['mount'], capture_output=True, text=True)
-            if device_node in mount_check.stdout:
+            # Ждем немного и проверяем, действительно ли устройство смонтировано
+            time.sleep(2)
+            mount_check = subprocess.run(['/bin/mount'], capture_output=True, text=True)
+            
+            # Проверяем несколькими способами
+            device_mounted = False
+            mount_point_used = False
+            
+            for line in mount_check.stdout.splitlines():
+                if device_node in line:
+                    device_mounted = True
+                    log_message('DEBUG', f"Найдена строка монтирования: {line.strip()}")
+                if mount_point in line:
+                    mount_point_used = True
+            
+            # Дополнительная проверка через /proc/mounts
+            try:
+                with open('/proc/mounts', 'r') as f:
+                    proc_mounts = f.read()
+                    if device_node in proc_mounts:
+                        device_mounted = True
+                        log_message('DEBUG', f"Устройство найдено в /proc/mounts")
+            except Exception as e:
+                log_message('DEBUG', f"Не удалось прочитать /proc/mounts: {e}")
+            
+            # Проверяем, есть ли файлы в точке монтирования
+            try:
+                if os.path.exists(mount_point):
+                    files_in_mount = os.listdir(mount_point)
+                    if files_in_mount:
+                        log_message('DEBUG', f"В точке монтирования найдены файлы: {files_in_mount[:5]}")  # Первые 5 файлов
+                        device_mounted = True
+            except Exception as e:
+                log_message('DEBUG', f"Не удалось проверить содержимое точки монтирования: {e}")
+            
+            if device_mounted or mount_point_used:
                 log_message('INFO', f"Устройство {device_node} успешно смонтировано в: {mount_point}")
                 
                 # Дополнительно устанавливаем права на точку монтирования
                 if target_user != "root":
-                    subprocess.run(["chown", f"{target_user}:{target_user}", mount_point], check=False)
-                    subprocess.run(["chmod", "755", mount_point], check=False)
+                    subprocess.run(["/bin/chown", f"{target_user}:{target_user}", mount_point], check=False)
+                    subprocess.run(["/bin/chmod", "755", mount_point], check=False)
             else:
                 log_message('ERROR', f"Команда mount завершилась успешно, но устройство не найдено в списке смонтированных")
+                log_message('DEBUG', f"Полный вывод mount: {mount_check.stdout}")
+                
+                # Пытаемся выяснить причину
+                log_message('DEBUG', "Дополнительная диагностика:")
+                
+                # Проверяем dmesg на ошибки
+                try:
+                    dmesg_result = subprocess.run(['/bin/dmesg', '-T'], capture_output=True, text=True, timeout=5)
+                    recent_lines = dmesg_result.stdout.splitlines()[-20:]  # Последние 20 строк
+                    for line in recent_lines:
+                        if any(keyword in line.lower() for keyword in ['error', 'fail', 'mount', device_node.split('/')[-1]]):
+                            log_message('DEBUG', f"dmesg: {line.strip()}")
+                except Exception as e:
+                    log_message('DEBUG', f"Не удалось получить dmesg: {e}")
         else:
             log_message('ERROR', f"Ошибка монтирования {device_node}: код возврата {result.returncode}")
             if result.stderr:
