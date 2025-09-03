@@ -19,6 +19,7 @@ NoNewPrivileges=true
 ProtectHome=false
 ReadWritePaths=/media /var/log /tmp /proc /sys /dev
 PrivateTmp=false
+PrivateMounts=false
 ProtectKernelTunables=false
 ProtectKernelModules=true
 ProtectControlGroups=false
