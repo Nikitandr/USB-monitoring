@@ -375,6 +375,104 @@ def wait_for_device_ready(device_node, timeout=10):
     log_message('WARNING', f"Устройство {device_node} не готово после {timeout} секунд ожидания")
     return False
 
+def unmount_device(device_node):
+    """Размонтирует USB устройство и очищает точку монтирования"""
+    log_message('INFO', f"Размонтирование устройства {device_node}")
+    
+    try:
+        # Находим все точки монтирования для данного устройства
+        mount_check = subprocess.run(['/bin/mount'], capture_output=True, text=True)
+        mount_points = []
+        
+        for line in mount_check.stdout.splitlines():
+            if device_node in line:
+                # Парсим строку монтирования: /dev/sdb on /media/user/1812-D65 type vfat (...)
+                parts = line.split(' on ')
+                if len(parts) >= 2:
+                    mount_point = parts[1].split(' type ')[0]
+                    mount_points.append(mount_point)
+                    log_message('DEBUG', f"Найдена точка монтирования: {mount_point}")
+        
+        # Размонтируем каждую найденную точку
+        for mount_point in mount_points:
+            try:
+                # Используем nsenter для размонтирования в основном namespace
+                umount_cmd = ['/usr/bin/nsenter', '-t', '1', '-m', '/bin/umount', mount_point]
+                
+                log_message('DEBUG', f"Выполняем размонтирование: {' '.join(umount_cmd)}")
+                result = subprocess.run(umount_cmd, capture_output=True, text=True, check=False)
+                
+                if result.returncode == 0:
+                    log_message('INFO', f"Устройство {device_node} размонтировано из {mount_point}")
+                    
+                    # Удаляем пустую точку монтирования
+                    try:
+                        if os.path.exists(mount_point) and os.path.isdir(mount_point):
+                            # Проверяем, что папка пустая
+                            if not os.listdir(mount_point):
+                                os.rmdir(mount_point)
+                                log_message('DEBUG', f"Удалена точка монтирования: {mount_point}")
+                            else:
+                                log_message('WARNING', f"Точка монтирования не пустая: {mount_point}")
+                    except Exception as e:
+                        log_message('WARNING', f"Не удалось удалить точку монтирования {mount_point}: {e}")
+                        
+                else:
+                    log_message('ERROR', f"Ошибка размонтирования {mount_point}: {result.stderr.strip()}")
+                    
+            except Exception as e:
+                log_message('ERROR', f"Неожиданная ошибка при размонтировании {mount_point}: {e}")
+                
+    except Exception as e:
+        log_message('ERROR', f"Ошибка при поиске точек монтирования для {device_node}: {e}")
+
+def cleanup_stale_mount_points():
+    """Очищает старые неиспользуемые точки монтирования при запуске"""
+    log_message('INFO', "Очистка старых точек монтирования")
+    
+    try:
+        # Получаем список всех смонтированных устройств
+        mount_check = subprocess.run(['/bin/mount'], capture_output=True, text=True)
+        mounted_points = set()
+        
+        for line in mount_check.stdout.splitlines():
+            if '/media/' in line:
+                parts = line.split(' on ')
+                if len(parts) >= 2:
+                    mount_point = parts[1].split(' type ')[0]
+                    mounted_points.add(mount_point)
+        
+        # Проверяем папки в /media/
+        if os.path.exists('/media'):
+            for user_dir in os.listdir('/media'):
+                user_media_path = os.path.join('/media', user_dir)
+                if os.path.isdir(user_media_path):
+                    for mount_dir in os.listdir(user_media_path):
+                        mount_path = os.path.join(user_media_path, mount_dir)
+                        if os.path.isdir(mount_path) and mount_path not in mounted_points:
+                            try:
+                                # Проверяем, что папка пустая
+                                if not os.listdir(mount_path):
+                                    os.rmdir(mount_path)
+                                    log_message('DEBUG', f"Удалена неиспользуемая точка монтирования: {mount_path}")
+                                else:
+                                    log_message('DEBUG', f"Точка монтирования не пустая, оставляем: {mount_path}")
+                            except Exception as e:
+                                log_message('WARNING', f"Не удалось удалить {mount_path}: {e}")
+                                
+    except Exception as e:
+        log_message('ERROR', f"Ошибка при очистке точек монтирования: {e}")
+
+def get_device_info_for_notification(device):
+    """Получает информацию об устройстве для уведомлений"""
+    return {
+        'vendor': device.get('ID_VENDOR', 'Unknown'),
+        'model': device.get('ID_MODEL', 'Unknown'),
+        'fs_type': device.get('ID_FS_TYPE', 'Unknown'),
+        'fs_label': device.get('ID_FS_LABEL', ''),
+        'device_node': device.device_node
+    }
+
 def mount_device(device_node):
     # Ждем готовности устройства
     if not wait_for_device_ready(device_node):
@@ -645,6 +743,9 @@ def main():
     
     log_message('INFO', "Запуск USB Monitor Client")
 
+    # Очищаем старые точки монтирования при запуске
+    cleanup_stale_mount_points()
+
     # udev-мониторинг блочных устройств
     context = pyudev.Context()
     monitor = pyudev.Monitor.from_netlink(context)
@@ -657,17 +758,62 @@ def main():
     log_message('INFO', f"Таймаут: {cfg['server']['timeout']}с, попыток: {cfg['server']['retry_attempts']}")
 
     for action, device in monitor:
-        if action != 'add':
+        # Обрабатываем события подключения и отключения
+        if action not in ('add', 'remove'):
             continue
 
-        # Фильтруем только USB-блочные с файловой системой
-        if device.get('ID_BUS') != 'usb' or not device.get('ID_FS_TYPE'):
+        # Фильтруем только USB-блочные устройства
+        if device.get('ID_BUS') != 'usb':
+            continue
+
+        # Для события remove не требуется файловая система
+        if action == 'add' and not device.get('ID_FS_TYPE'):
             continue
 
         # Обрабатываем и диски, и разделы
         if device.get('DEVTYPE') not in ('disk', 'partition'):
             continue
 
+        device_node = device.device_node
+        device_info = get_device_info_for_notification(device)
+        device_info_str = f"{device_info['vendor']} {device_info['model']} ({device_info.get('fs_type', 'Unknown')})"
+
+        if action == 'remove':
+            # Обработка отключения USB устройства
+            log_message('INFO', f"USB устройство отключено: {device_node}")
+            log_message('DEBUG', f"Информация об устройстве: {device_info_str}")
+            
+            # Размонтируем устройство
+            unmount_device(device_node)
+            
+            # Уведомляем всех активных пользователей об отключении
+            try:
+                # Получаем список всех активных пользователей
+                active_users = set()
+                loginctl_result = subprocess.run(['loginctl', 'list-sessions', '--no-legend'], 
+                                               capture_output=True, text=True, check=False)
+                if loginctl_result.returncode == 0:
+                    for line in loginctl_result.stdout.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 3:
+                            session_id = parts[0]
+                            user = parts[2]
+                            if user != 'root':
+                                active_users.add(user)
+                
+                # Отправляем уведомления всем активным пользователям
+                for username in active_users:
+                    send_desktop_notification(
+                        username,
+                        "USB устройство отключено",
+                        f"Устройство {device_info_str} было отключено"
+                    )
+            except Exception as e:
+                log_message('WARNING', f"Не удалось отправить уведомления об отключении: {e}")
+            
+            continue
+
+        # Обработка подключения USB устройства (action == 'add')
         # Получаем активного пользователя
         username = get_active_user()
         if not username:
@@ -678,16 +824,6 @@ def main():
         pid = device.get('ID_MODEL_ID', 'unknown')
         serial = device.get('ID_SERIAL_SHORT', '')
         
-        # Формируем информацию об устройстве
-        device_info = {
-            'vendor': device.get('ID_VENDOR', 'Unknown'),
-            'model': device.get('ID_MODEL', 'Unknown'),
-            'fs_type': device.get('ID_FS_TYPE', 'Unknown'),
-            'fs_label': device.get('ID_FS_LABEL', ''),
-            'device_node': device.device_node
-        }
-        
-        device_info_str = f"{device_info['vendor']} {device_info['model']} ({device_info['fs_type']})"
         log_info = f"VID:PID={vid}:{pid}, Serial={serial or 'n/a'}, User={username}"
         
         log_message('INFO', f"USB устройство подключено: {log_info}")
