@@ -355,12 +355,6 @@ def _get_user_via_proc():
     return None
 
 def mount_device(device_node):
-    bus = SystemBus()
-    obj_path = find_fs_object_path(bus, device_node)
-    if not obj_path:
-        log_message('ERROR', "Не найден объект UDisks2 для монтирования")
-        return
-
     # Получаем имя активного пользователя
     user = get_active_user()
     if not user:
@@ -392,27 +386,20 @@ def mount_device(device_node):
         except Exception as e:
             log_message('ERROR', f"Не удалось создать или назначить {mount_base}: {e}")
 
-    # Получаем информацию о блочном устройстве для создания уникального имени папки
+    # Получаем информацию об устройстве для создания уникального имени папки
     try:
-        block = bus.get(UDISKS_BUS_NAME, obj_path)[BLOCK_IFACE]
+        # Используем blkid для получения информации о файловой системе
+        blkid_output = subprocess.check_output(['blkid', device_node], stderr=subprocess.DEVNULL).decode('utf-8')
         
-        # Правильный способ получения свойств D-Bus объекта
         fs_label = ''
         fs_uuid = ''
         
-        try:
-            # Пробуем получить метку файловой системы
-            if hasattr(block, 'IdLabel'):
-                fs_label = block.IdLabel or ''
-        except:
-            pass
-            
-        try:
-            # Пробуем получить UUID файловой системы
-            if hasattr(block, 'IdUUID'):
-                fs_uuid = block.IdUUID or ''
-        except:
-            pass
+        # Парсим вывод blkid
+        for part in blkid_output.split():
+            if part.startswith('LABEL='):
+                fs_label = part.split('=', 1)[1].strip('"')
+            elif part.startswith('UUID='):
+                fs_uuid = part.split('=', 1)[1].strip('"')
         
         # Создаем имя папки монтирования
         if fs_label:
@@ -422,51 +409,55 @@ def mount_device(device_node):
         else:
             mount_name = os.path.basename(device_node)
             
-        mount_point = os.path.join(mount_base, mount_name)
-        
-        # Создаем точку монтирования
+    except subprocess.CalledProcessError:
+        # Если blkid не сработал, используем имя устройства
+        mount_name = os.path.basename(device_node)
+        log_message('WARNING', f"Не удалось получить информацию о файловой системе для {device_node}")
+    
+    mount_point = os.path.join(mount_base, mount_name)
+    
+    # Создаем точку монтирования
+    try:
         if not os.path.exists(mount_point):
             os.makedirs(mount_point, exist_ok=True)
             if target_user != "root":
                 subprocess.run(["chown", f"{target_user}:{target_user}", mount_point], check=False)
-                
     except Exception as e:
-        log_message('ERROR', f"Ошибка создания точки монтирования: {e}")
+        log_message('ERROR', f"Ошибка создания точки монтирования {mount_point}: {e}")
         return
 
-    fs = bus.get(UDISKS_BUS_NAME, obj_path)[FS_IFACE]
-    
-    # Опции монтирования с указанием конкретной точки монтирования
-    mount_options = {
-        'fstype': GLib.Variant('s', ''),  # Автоопределение
-        'options': GLib.Variant('s', f'rw,nosuid,nodev,uid={uid},gid={gid},umask=0022')
-    }
-    
+    # Монтируем устройство напрямую через mount команду
+    # Это обходит polkit ограничения, так как выполняется от root
     try:
-        # Монтируем в указанную точку
-        target = fs.Mount(mount_options)
-        log_message('INFO', f"Устройство смонтировано в: {target}")
+        if target_user != "root":
+            # Опции для пользовательского монтирования
+            mount_options = f'rw,nosuid,nodev,uid={uid},gid={gid},umask=0022'
+        else:
+            # Опции для root монтирования
+            mount_options = 'rw,nosuid,nodev'
         
-        # Если UDisks2 все равно смонтировал не туда, пробуем перемонтировать
-        if target != mount_point and target_user != "root":
-            log_message('INFO', f"Перемонтируем из {target} в {mount_point}")
-            try:
-                # Размонтируем
-                fs.Unmount({})
-                # Монтируем вручную через mount команду
-                subprocess.run([
-                    'mount', '-o', f'rw,nosuid,nodev,uid={uid},gid={gid},umask=0022',
-                    device_node, mount_point
-                ], check=True)
-                log_message('INFO', f"Устройство перемонтировано в: {mount_point}")
-            except Exception as e:
-                log_message('ERROR', f"Ошибка перемонтирования: {e}")
-                # Оставляем как есть, но меняем права
-                if os.path.exists(target):
-                    subprocess.run(["chown", "-R", f"{target_user}:{target_user}", target], check=False)
+        # Выполняем монтирование
+        subprocess.run([
+            'mount', '-o', mount_options, device_node, mount_point
+        ], check=True)
+        
+        log_message('INFO', f"Устройство {device_node} успешно смонтировано в: {mount_point}")
+        
+        # Дополнительно устанавливаем права на точку монтирования
+        if target_user != "root":
+            subprocess.run(["chown", f"{target_user}:{target_user}", mount_point], check=False)
+            subprocess.run(["chmod", "755", mount_point], check=False)
             
+    except subprocess.CalledProcessError as e:
+        log_message('ERROR', f"Ошибка монтирования {device_node}: {e}")
+        # Удаляем созданную точку монтирования при ошибке
+        try:
+            if os.path.exists(mount_point) and os.path.isdir(mount_point):
+                os.rmdir(mount_point)
+        except:
+            pass
     except Exception as e:
-        log_message('ERROR', f"Ошибка монтирования: {e}")
+        log_message('ERROR', f"Неожиданная ошибка при монтировании: {e}")
 
 def send_desktop_notification(username, title, message):
     """Отправляет уведомление пользователю"""
