@@ -953,8 +953,7 @@ class WebSocketClient:
             
             # Дополнительные настройки для socketio клиента
             connect_kwargs = {
-                'wait_timeout': self.server_config.get('timeout', 10),
-                'retry': True
+                'wait_timeout': self.server_config.get('timeout', 10)
             }
             
             log_message('DEBUG', f"Параметры подключения: {connect_kwargs}")
