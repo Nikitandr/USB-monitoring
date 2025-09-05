@@ -10,6 +10,8 @@ import requests
 import json
 import time
 import urllib3
+import threading
+import socketio
 
 # UDisks2 D-Bus константы
 UDISKS_BUS_NAME     = 'org.freedesktop.UDisks2'
@@ -31,10 +33,10 @@ DEFAULT_SERVER_CONFIG = {
     'ssl_warnings': False   # Отключаем SSL предупреждения
 }
 
-# Глобальные переменные для кэширования
-_device_cache = {}
-_cache_timestamps = {}
+# Глобальные переменные
 _pending_requests = {}
+_pending_devices = {}  # Устройства, ожидающие разрешения: device_key -> device_info
+_websocket_client = None
 
 def check_root():
     if os.geteuid() != 0:
@@ -65,14 +67,6 @@ def log_message(level, message):
 def check_device_permission_server(username, vid, pid, serial, server_config):
     """Проверяет разрешение устройства через сервер API"""
     device_key = f"{username}:{vid}:{pid}:{serial}"
-    current_time = time.time()
-    
-    # Проверяем кэш
-    if device_key in _device_cache:
-        cache_time = _cache_timestamps.get(device_key, 0)
-        if current_time - cache_time < server_config['cache_duration']:
-            log_message('DEBUG', f"Используем кэшированный результат для {device_key}")
-            return _device_cache[device_key]
     
     # Настройка SSL предупреждений
     if not server_config.get('ssl_warnings', True):
@@ -104,13 +98,9 @@ def check_device_permission_server(username, vid, pid, serial, server_config):
                 result = response.json()
                 status = result.get('status', 'unknown')
                 
-                # Кэшируем результат только для allowed/denied, но не для unknown
-                if status in ['allowed', 'denied']:
-                    _device_cache[device_key] = status
-                    _cache_timestamps[device_key] = current_time
-                    # Очищаем ожидающий запрос, если устройство получило окончательный статус
-                    if device_key in _pending_requests:
-                        del _pending_requests[device_key]
+                # Очищаем ожидающий запрос, если устройство получило окончательный статус
+                if status in ['allowed', 'denied'] and device_key in _pending_requests:
+                    del _pending_requests[device_key]
                 
                 log_message('INFO', f"Сервер ответил: {status} для {device_key}")
                 return status
@@ -679,7 +669,23 @@ def mount_device(device_node):
 def send_desktop_notification(username, title, message):
     """Отправляет уведомление пользователю"""
     try:
-        # Получаем DISPLAY и другие переменные окружения для пользователя
+        # Простой метод через notify-send
+        try:
+            # Пытаемся отправить уведомление напрямую
+            result = subprocess.run([
+                'sudo', '-u', username, 
+                'DISPLAY=:0', 'notify-send', 
+                '--urgency=normal', '--expire-time=5000', 
+                title, message
+            ], capture_output=True, text=True, timeout=10, check=False)
+            
+            if result.returncode == 0:
+                log_message('DEBUG', f"Уведомление отправлено пользователю {username}")
+                return
+        except Exception as e:
+            log_message('DEBUG', f"Простой метод не сработал: {e}")
+        
+        # Fallback метод через поиск DISPLAY
         display = None
         xdg_runtime_dir = None
         
@@ -738,6 +744,185 @@ def send_desktop_notification(username, title, message):
     except Exception as e:
         log_message('ERROR', f"Ошибка отправки уведомления: {e}")
 
+class WebSocketClient:
+    """WebSocket клиент для получения уведомлений от сервера"""
+    
+    def __init__(self, server_config):
+        self.server_config = server_config
+        self.sio = socketio.Client(ssl_verify=server_config.get('ssl_verify', False))
+        self.connected = False
+        self.current_user = None
+        
+        # Настраиваем обработчики событий
+        self.sio.on('connect', self.on_connect)
+        self.sio.on('disconnect', self.on_disconnect)
+        self.sio.on('request_approved', self.on_request_approved)
+        self.sio.on('request_denied', self.on_request_denied)
+    
+    def connect(self):
+        """Подключается к WebSocket серверу"""
+        try:
+            server_url = self.server_config['server_url']
+            log_message('INFO', f"Подключение к WebSocket серверу: {server_url}")
+            
+            self.sio.connect(server_url)
+            return True
+            
+        except Exception as e:
+            log_message('ERROR', f"Ошибка подключения к WebSocket: {e}")
+            return False
+    
+    def disconnect(self):
+        """Отключается от WebSocket сервера"""
+        try:
+            if self.connected:
+                self.sio.disconnect()
+        except Exception as e:
+            log_message('ERROR', f"Ошибка отключения от WebSocket: {e}")
+    
+    def join_user_room(self, username):
+        """Присоединяется к комнате пользователя"""
+        try:
+            if self.connected:
+                self.current_user = username
+                self.sio.emit('join_user', {'username': username})
+                log_message('DEBUG', f"Присоединились к комнате пользователя: {username}")
+        except Exception as e:
+            log_message('ERROR', f"Ошибка присоединения к комнате пользователя: {e}")
+    
+    def on_connect(self):
+        """Обработчик подключения"""
+        self.connected = True
+        log_message('INFO', "WebSocket подключен")
+        
+        # Присоединяемся к комнате текущего пользователя, если он известен
+        if self.current_user:
+            self.join_user_room(self.current_user)
+    
+    def on_disconnect(self):
+        """Обработчик отключения"""
+        self.connected = False
+        log_message('WARNING', "WebSocket отключен")
+    
+    def on_request_approved(self, data):
+        """Обработчик одобрения запроса"""
+        try:
+            username = data.get('username')
+            request_id = data.get('request_id')
+            
+            log_message('INFO', f"Получено одобрение запроса {request_id} для пользователя {username}")
+            
+            # Ищем соответствующее устройство в pending_devices
+            device_to_mount = None
+            device_key_to_remove = None
+            
+            for device_key, device_info in _pending_devices.items():
+                if device_info.get('username') == username:
+                    # Проверяем, соответствует ли это устройство запросу
+                    if device_key in _pending_requests and _pending_requests[device_key] == request_id:
+                        device_to_mount = device_info
+                        device_key_to_remove = device_key
+                        break
+            
+            if device_to_mount:
+                log_message('INFO', f"Автоматически монтируем одобренное устройство: {device_to_mount['device_node']}")
+                
+                # Отправляем уведомление пользователю
+                send_desktop_notification(
+                    username,
+                    "USB устройство одобрено",
+                    f"Устройство {device_to_mount['device_info_str']} одобрено и подключается автоматически"
+                )
+                
+                # Монтируем устройство
+                mount_device(device_to_mount['device_node'])
+                
+                # Очищаем из pending
+                if device_key_to_remove:
+                    del _pending_devices[device_key_to_remove]
+                    if device_key_to_remove in _pending_requests:
+                        del _pending_requests[device_key_to_remove]
+            else:
+                log_message('WARNING', f"Не найдено устройство для одобренного запроса {request_id}")
+                
+        except Exception as e:
+            log_message('ERROR', f"Ошибка обработки одобрения запроса: {e}")
+    
+    def on_request_denied(self, data):
+        """Обработчик отклонения запроса"""
+        try:
+            username = data.get('username')
+            request_id = data.get('request_id')
+            
+            log_message('INFO', f"Получено отклонение запроса {request_id} для пользователя {username}")
+            
+            # Ищем соответствующее устройство в pending_devices
+            device_key_to_remove = None
+            device_info_str = "неизвестное устройство"
+            
+            for device_key, device_info in _pending_devices.items():
+                if device_info.get('username') == username:
+                    if device_key in _pending_requests and _pending_requests[device_key] == request_id:
+                        device_info_str = device_info.get('device_info_str', device_info_str)
+                        device_key_to_remove = device_key
+                        break
+            
+            # Отправляем уведомление пользователю
+            send_desktop_notification(
+                username,
+                "USB устройство отклонено",
+                f"Запрос на подключение устройства {device_info_str} был отклонен администратором"
+            )
+            
+            # Очищаем из pending
+            if device_key_to_remove:
+                del _pending_devices[device_key_to_remove]
+                if device_key_to_remove in _pending_requests:
+                    del _pending_requests[device_key_to_remove]
+                    
+        except Exception as e:
+            log_message('ERROR', f"Ошибка обработки отклонения запроса: {e}")
+
+def start_websocket_client(server_config):
+    """Запускает WebSocket клиент в отдельном потоке"""
+    global _websocket_client
+    
+    def websocket_thread():
+        try:
+            _websocket_client = WebSocketClient(server_config)
+            
+            # Пытаемся подключиться с повторными попытками
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                if _websocket_client.connect():
+                    break
+                else:
+                    if attempt < max_attempts - 1:
+                        log_message('WARNING', f"Попытка подключения WebSocket {attempt + 1}/{max_attempts} неудачна, повтор через 10 секунд")
+                        time.sleep(10)
+                    else:
+                        log_message('ERROR', "Не удалось подключиться к WebSocket серверу")
+                        return
+            
+            # Поддерживаем соединение
+            while True:
+                try:
+                    time.sleep(30)  # Проверяем соединение каждые 30 секунд
+                    if not _websocket_client.connected:
+                        log_message('WARNING', "WebSocket соединение потеряно, пытаемся переподключиться")
+                        _websocket_client.connect()
+                except Exception as e:
+                    log_message('ERROR', f"Ошибка в WebSocket потоке: {e}")
+                    time.sleep(10)
+                    
+        except Exception as e:
+            log_message('ERROR', f"Критическая ошибка в WebSocket потоке: {e}")
+    
+    # Запускаем WebSocket в отдельном потоке
+    thread = threading.Thread(target=websocket_thread, daemon=True)
+    thread.start()
+    log_message('INFO', "WebSocket клиент запущен в фоновом режиме")
+
 def main():
     check_root()
     
@@ -746,16 +931,21 @@ def main():
     # Очищаем старые точки монтирования при запуске
     cleanup_stale_mount_points()
 
+    # Загружаем конфигурацию
+    cfg = load_config()
+    
+    log_message('INFO', f"Сервер: {cfg['server']['server_url']}")
+    log_message('INFO', f"Таймаут: {cfg['server']['timeout']}с, попыток: {cfg['server']['retry_attempts']}")
+
+    # Запускаем WebSocket клиент для получения уведомлений от сервера
+    start_websocket_client(cfg['server'])
+
     # udev-мониторинг блочных устройств
     context = pyudev.Context()
     monitor = pyudev.Monitor.from_netlink(context)
     monitor.filter_by(subsystem='block')
 
     log_message('INFO', "Мониторинг USB-событий запущен")
-    cfg = load_config()
-    
-    log_message('INFO', f"Сервер: {cfg['server']['server_url']}")
-    log_message('INFO', f"Таймаут: {cfg['server']['timeout']}с, попыток: {cfg['server']['retry_attempts']}")
 
     for action, device in monitor:
         # Обрабатываем события подключения и отключения
@@ -851,6 +1041,23 @@ def main():
             
         else:  # unknown
             log_message('INFO', f"Неизвестное устройство, запрос отправлен администратору: {log_info}")
+            
+            # Сохраняем информацию об устройстве для автоматического монтирования после одобрения
+            device_key = f"{username}:{vid}:{pid}:{serial}"
+            _pending_devices[device_key] = {
+                'username': username,
+                'device_node': device_node,
+                'device_info_str': device_info_str,
+                'vid': vid,
+                'pid': pid,
+                'serial': serial
+            }
+            
+            # Присоединяемся к комнате пользователя через WebSocket для получения уведомлений
+            global _websocket_client
+            if _websocket_client and _websocket_client.connected:
+                _websocket_client.join_user_room(username)
+            
             send_desktop_notification(
                 username, 
                 "USB устройство ожидает разрешения", 

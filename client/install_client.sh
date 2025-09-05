@@ -68,6 +68,7 @@ REQUIRED_PACKAGES=(
     "python3-requests"
     "python3-pydbus"
     "python3-gi"
+    "python3-socketio"
     "libnotify-bin"
     "policykit-1"
     "udev"
@@ -86,6 +87,7 @@ python3 -c "import yaml" 2>/dev/null || FAILED_IMPORTS="$FAILED_IMPORTS yaml"
 python3 -c "import requests" 2>/dev/null || FAILED_IMPORTS="$FAILED_IMPORTS requests"
 python3 -c "import pydbus" 2>/dev/null || FAILED_IMPORTS="$FAILED_IMPORTS pydbus"
 python3 -c "from gi.repository import GLib" 2>/dev/null || FAILED_IMPORTS="$FAILED_IMPORTS gi.repository.GLib"
+python3 -c "import socketio" 2>/dev/null || FAILED_IMPORTS="$FAILED_IMPORTS socketio"
 
 if [ -n "$FAILED_IMPORTS" ]; then
     echo "ОШИБКА: Не удалось импортировать модули:$FAILED_IMPORTS"
