@@ -13,6 +13,10 @@ import urllib3
 import threading
 import socketio
 
+# Глобальное отключение SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+urllib3.disable_warnings()
+
 # UDisks2 D-Bus константы
 UDISKS_BUS_NAME     = 'org.freedesktop.UDisks2'
 UDISKS_OBJ_MANAGER  = '/org/freedesktop/UDisks2'
@@ -71,6 +75,7 @@ def check_device_permission_server(username, vid, pid, serial, server_config):
     # Настройка SSL предупреждений
     if not server_config.get('ssl_warnings', True):
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        urllib3.disable_warnings()
     
     # Делаем запрос к серверу
     url = f"{server_config['server_url']}/api/devices/check"
@@ -670,22 +675,122 @@ def send_desktop_notification(username, title, message):
     """Отправляет уведомление пользователю с множественными fallback методами"""
     log_message('DEBUG', f"📢 Попытка отправить уведомление пользователю {username}: {title}")
     
-    # Метод 1: Простой notify-send с DISPLAY=:0
+    # Метод 1: Прямая отправка через D-Bus без sudo
     try:
+        import pwd
+        user_info = pwd.getpwnam(username)
+        uid = user_info.pw_uid
+        
+        # Создаем скрипт для отправки через dbus
+        dbus_script = f'''
+import os
+import dbus
+try:
+    # Устанавливаем переменные окружения для пользователя
+    os.environ["XDG_RUNTIME_DIR"] = "/run/user/{uid}"
+    
+    # Пытаемся подключиться к session bus пользователя
+    bus = dbus.SessionBus()
+    notify = bus.get_object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
+    interface = dbus.Interface(notify, "org.freedesktop.Notifications")
+    interface.Notify("USB Monitor", 0, "", "{title}", "{message}", [], {{}}, 5000)
+    print("SUCCESS")
+except Exception as e:
+    print(f"ERROR: {{e}}")
+'''
+        
+        # Записываем скрипт во временный файл
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+            f.write(dbus_script)
+            script_path = f.name
+        
+        try:
+            # Выполняем скрипт от имени пользователя через runuser
+            result = subprocess.run([
+                'runuser', '-u', username, '--', 
+                'python3', script_path
+            ], capture_output=True, text=True, timeout=10, check=False)
+            
+            if result.returncode == 0 and "SUCCESS" in result.stdout:
+                log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 1 - dbus)")
+                return True
+            else:
+                log_message('DEBUG', f"Метод 1 неудачен: {result.stdout.strip()}, {result.stderr.strip()}")
+        finally:
+            # Удаляем временный файл
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+                
+    except Exception as e:
+        log_message('DEBUG', f"Метод 1 ошибка: {e}")
+    
+    # Метод 2: Через systemd-run для пользовательской сессии
+    try:
+        import pwd
+        user_info = pwd.getpwnam(username)
+        uid = user_info.pw_uid
+        
         result = subprocess.run([
-            'sudo', '-u', username, 
-            'DISPLAY=:0', 'notify-send', 
-            '--urgency=normal', '--expire-time=5000', 
+            'systemd-run', '--uid', str(uid), '--gid', str(uid), 
+            '--user', '--scope', '--quiet', '--setenv=DISPLAY=:0',
+            'notify-send', '--urgency=normal', '--expire-time=5000', 
             title, message
         ], capture_output=True, text=True, timeout=10, check=False)
         
         if result.returncode == 0:
-            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 1)")
+            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 2 - systemd)")
             return True
         else:
-            log_message('DEBUG', f"Метод 1 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
+            log_message('DEBUG', f"Метод 2 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
+            
     except Exception as e:
-        log_message('DEBUG', f"Метод 1 ошибка: {e}")
+        log_message('DEBUG', f"Метод 2 ошибка: {e}")
+    
+    # Метод 3: Через runuser с определением DISPLAY
+    try:
+        # Ищем DISPLAY пользователя
+        display = None
+        for proc_dir in os.listdir('/proc'):
+            if not proc_dir.isdigit():
+                continue
+            try:
+                environ_path = f'/proc/{proc_dir}/environ'
+                if os.path.exists(environ_path):
+                    with open(environ_path, 'rb') as f:
+                        environ_data = f.read().decode('utf-8', errors='ignore')
+                    
+                    if f'USER={username}' in environ_data:
+                        for line in environ_data.split('\0'):
+                            if line.startswith('DISPLAY='):
+                                display = line.split('=', 1)[1]
+                                break
+                        if display:
+                            break
+            except (OSError, IOError, PermissionError):
+                continue
+        
+        if display:
+            log_message('DEBUG', f"Найден DISPLAY для {username}: {display}")
+            result = subprocess.run([
+                'runuser', '-u', username, '--', 
+                'env', f'DISPLAY={display}', 
+                'notify-send', '--urgency=normal', '--expire-time=5000', 
+                title, message
+            ], capture_output=True, text=True, timeout=10, check=False)
+            
+            if result.returncode == 0:
+                log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 3 - runuser)")
+                return True
+            else:
+                log_message('DEBUG', f"Метод 3 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
+        else:
+            log_message('DEBUG', f"Не найден DISPLAY для пользователя {username}")
+            
+    except Exception as e:
+        log_message('DEBUG', f"Метод 3 ошибка: {e}")
     
     # Метод 2: Поиск реального DISPLAY через /proc
     display = None
@@ -842,16 +947,49 @@ class WebSocketClient:
         """Подключается к WebSocket серверу"""
         try:
             server_url = self.server_config['server_url']
-            log_message('INFO', f"Попытка подключения к WebSocket серверу: {server_url}")
+            log_message('INFO', f"🔌 Попытка подключения к WebSocket серверу: {server_url}")
             log_message('DEBUG', f"SSL verify: {self.server_config.get('ssl_verify', False)}")
+            log_message('DEBUG', f"Timeout: {self.server_config.get('timeout', 10)}")
             
-            self.sio.connect(server_url)
-            log_message('INFO', f"WebSocket подключение установлено успешно")
+            # Дополнительные настройки для socketio клиента
+            connect_kwargs = {
+                'wait_timeout': self.server_config.get('timeout', 10),
+                'retry': True
+            }
+            
+            log_message('DEBUG', f"Параметры подключения: {connect_kwargs}")
+            
+            self.sio.connect(server_url, **connect_kwargs)
+            log_message('INFO', f"✅ WebSocket подключение установлено успешно")
             return True
             
         except Exception as e:
-            log_message('ERROR', f"Ошибка подключения к WebSocket: {e}")
+            log_message('ERROR', f"❌ Ошибка подключения к WebSocket: {e}")
             log_message('DEBUG', f"Детали ошибки WebSocket: {type(e).__name__}: {str(e)}")
+            
+            # Дополнительная диагностика
+            try:
+                import socket
+                from urllib.parse import urlparse
+                
+                parsed_url = urlparse(self.server_config['server_url'])
+                host = parsed_url.hostname
+                port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
+                
+                log_message('DEBUG', f"Проверка доступности {host}:{port}")
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                result = sock.connect_ex((host, port))
+                sock.close()
+                
+                if result == 0:
+                    log_message('DEBUG', f"Порт {host}:{port} доступен")
+                else:
+                    log_message('DEBUG', f"Порт {host}:{port} недоступен (код: {result})")
+                    
+            except Exception as diag_e:
+                log_message('DEBUG', f"Ошибка диагностики: {diag_e}")
+            
             return False
     
     def disconnect(self):
