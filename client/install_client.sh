@@ -69,6 +69,7 @@ REQUIRED_PACKAGES=(
     "python3-pydbus"
     "python3-gi"
     "python3-socketio"
+    "python3-websocket-client"
     "libnotify-bin"
     "policykit-1"
     "udev"

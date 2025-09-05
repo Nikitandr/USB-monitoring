@@ -377,20 +377,26 @@ def unmount_device(device_node):
     try:
         # Находим все точки монтирования для данного устройства
         mount_check = subprocess.run(['/bin/mount'], capture_output=True, text=True)
-        mount_points = []
+        mount_points = set()  # Используем set для избежания дублирования
         
         for line in mount_check.stdout.splitlines():
-            if device_node in line:
+            if device_node in line and ' on ' in line:
                 # Парсим строку монтирования: /dev/sdb on /media/user/1812-D65 type vfat (...)
                 parts = line.split(' on ')
                 if len(parts) >= 2:
-                    mount_point = parts[1].split(' type ')[0]
-                    mount_points.append(mount_point)
-                    log_message('DEBUG', f"Найдена точка монтирования: {mount_point}")
+                    mount_point = parts[1].split(' type ')[0].strip()
+                    if mount_point:  # Проверяем, что точка монтирования не пустая
+                        mount_points.add(mount_point)
+                        log_message('DEBUG', f"Найдена точка монтирования: {mount_point}")
         
         # Размонтируем каждую найденную точку
         for mount_point in mount_points:
             try:
+                # Проверяем, что точка монтирования еще существует
+                if not os.path.exists(mount_point):
+                    log_message('DEBUG', f"Точка монтирования {mount_point} уже не существует")
+                    continue
+                
                 # Используем nsenter для размонтирования в основном namespace
                 umount_cmd = ['/usr/bin/nsenter', '-t', '1', '-m', '/bin/umount', mount_point]
                 
@@ -408,12 +414,16 @@ def unmount_device(device_node):
                                 os.rmdir(mount_point)
                                 log_message('DEBUG', f"Удалена точка монтирования: {mount_point}")
                             else:
-                                log_message('WARNING', f"Точка монтирования не пустая: {mount_point}")
+                                log_message('DEBUG', f"Точка монтирования не пустая, оставляем: {mount_point}")
                     except Exception as e:
-                        log_message('WARNING', f"Не удалось удалить точку монтирования {mount_point}: {e}")
+                        log_message('DEBUG', f"Не удалось удалить точку монтирования {mount_point}: {e}")
                         
                 else:
-                    log_message('ERROR', f"Ошибка размонтирования {mount_point}: {result.stderr.strip()}")
+                    # Проверяем, не была ли точка уже размонтирована
+                    if "not mounted" in result.stderr or "no mount point" in result.stderr:
+                        log_message('DEBUG', f"Точка {mount_point} уже размонтирована")
+                    else:
+                        log_message('ERROR', f"Ошибка размонтирования {mount_point}: {result.stderr.strip()}")
                     
             except Exception as e:
                 log_message('ERROR', f"Неожиданная ошибка при размонтировании {mount_point}: {e}")
@@ -672,132 +682,15 @@ def mount_device(device_node):
         log_message('ERROR', f"Неожиданная ошибка при монтировании: {e}")
 
 def send_desktop_notification(username, title, message):
-    """Отправляет уведомление пользователю с множественными fallback методами"""
-    log_message('DEBUG', f"📢 Попытка отправить уведомление пользователю {username}: {title}")
+    """Отправляет уведомление пользователю"""
+    log_message('DEBUG', f"📢 Отправка уведомления пользователю {username}: {title}")
     
-    # Метод 1: Прямая отправка через D-Bus без sudo
+    # Метод 1: Через su с определением окружения пользователя
     try:
-        import pwd
-        user_info = pwd.getpwnam(username)
-        uid = user_info.pw_uid
-        
-        # Создаем скрипт для отправки через dbus
-        dbus_script = f'''
-import os
-import dbus
-try:
-    # Устанавливаем переменные окружения для пользователя
-    os.environ["XDG_RUNTIME_DIR"] = "/run/user/{uid}"
-    
-    # Пытаемся подключиться к session bus пользователя
-    bus = dbus.SessionBus()
-    notify = bus.get_object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
-    interface = dbus.Interface(notify, "org.freedesktop.Notifications")
-    interface.Notify("USB Monitor", 0, "", "{title}", "{message}", [], {{}}, 5000)
-    print("SUCCESS")
-except Exception as e:
-    print(f"ERROR: {{e}}")
-'''
-        
-        # Записываем скрипт во временный файл
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            f.write(dbus_script)
-            script_path = f.name
-        
-        try:
-            # Выполняем скрипт от имени пользователя через runuser
-            result = subprocess.run([
-                'runuser', '-u', username, '--', 
-                'python3', script_path
-            ], capture_output=True, text=True, timeout=10, check=False)
-            
-            if result.returncode == 0 and "SUCCESS" in result.stdout:
-                log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 1 - dbus)")
-                return True
-            else:
-                log_message('DEBUG', f"Метод 1 неудачен: {result.stdout.strip()}, {result.stderr.strip()}")
-        finally:
-            # Удаляем временный файл
-            try:
-                os.unlink(script_path)
-            except:
-                pass
-                
-    except Exception as e:
-        log_message('DEBUG', f"Метод 1 ошибка: {e}")
-    
-    # Метод 2: Через systemd-run для пользовательской сессии
-    try:
-        import pwd
-        user_info = pwd.getpwnam(username)
-        uid = user_info.pw_uid
-        
-        result = subprocess.run([
-            'systemd-run', '--uid', str(uid), '--gid', str(uid), 
-            '--user', '--scope', '--quiet', '--setenv=DISPLAY=:0',
-            'notify-send', '--urgency=normal', '--expire-time=5000', 
-            title, message
-        ], capture_output=True, text=True, timeout=10, check=False)
-        
-        if result.returncode == 0:
-            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 2 - systemd)")
-            return True
-        else:
-            log_message('DEBUG', f"Метод 2 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
-            
-    except Exception as e:
-        log_message('DEBUG', f"Метод 2 ошибка: {e}")
-    
-    # Метод 3: Через runuser с определением DISPLAY
-    try:
-        # Ищем DISPLAY пользователя
+        # Ищем окружение пользователя
         display = None
-        for proc_dir in os.listdir('/proc'):
-            if not proc_dir.isdigit():
-                continue
-            try:
-                environ_path = f'/proc/{proc_dir}/environ'
-                if os.path.exists(environ_path):
-                    with open(environ_path, 'rb') as f:
-                        environ_data = f.read().decode('utf-8', errors='ignore')
-                    
-                    if f'USER={username}' in environ_data:
-                        for line in environ_data.split('\0'):
-                            if line.startswith('DISPLAY='):
-                                display = line.split('=', 1)[1]
-                                break
-                        if display:
-                            break
-            except (OSError, IOError, PermissionError):
-                continue
+        wayland_display = None
         
-        if display:
-            log_message('DEBUG', f"Найден DISPLAY для {username}: {display}")
-            result = subprocess.run([
-                'runuser', '-u', username, '--', 
-                'env', f'DISPLAY={display}', 
-                'notify-send', '--urgency=normal', '--expire-time=5000', 
-                title, message
-            ], capture_output=True, text=True, timeout=10, check=False)
-            
-            if result.returncode == 0:
-                log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 3 - runuser)")
-                return True
-            else:
-                log_message('DEBUG', f"Метод 3 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
-        else:
-            log_message('DEBUG', f"Не найден DISPLAY для пользователя {username}")
-            
-    except Exception as e:
-        log_message('DEBUG', f"Метод 3 ошибка: {e}")
-    
-    # Метод 2: Поиск реального DISPLAY через /proc
-    display = None
-    xdg_runtime_dir = None
-    wayland_display = None
-    
-    try:
         for proc_dir in os.listdir('/proc'):
             if not proc_dir.isdigit():
                 continue
@@ -811,8 +704,6 @@ except Exception as e:
                         for line in environ_data.split('\0'):
                             if line.startswith('DISPLAY='):
                                 display = line.split('=', 1)[1]
-                            elif line.startswith('XDG_RUNTIME_DIR='):
-                                xdg_runtime_dir = line.split('=', 1)[1]
                             elif line.startswith('WAYLAND_DISPLAY='):
                                 wayland_display = line.split('=', 1)[1]
                         if display or wayland_display:
@@ -836,96 +727,37 @@ except Exception as e:
                 env['DISPLAY'] = display
             if wayland_display:
                 env['WAYLAND_DISPLAY'] = wayland_display
-            if xdg_runtime_dir:
-                env['XDG_RUNTIME_DIR'] = xdg_runtime_dir
-            else:
-                env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
             
-            log_message('DEBUG', f"Найдено окружение: DISPLAY={display}, WAYLAND_DISPLAY={wayland_display}")
+            env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
             
-            # Пробуем отправить уведомление
+            # Отправляем уведомление
             result = subprocess.run([
                 'su', '-', username, '-c', 
                 f'notify-send --urgency=normal --expire-time=5000 "{title}" "{message}"'
             ], env=env, capture_output=True, text=True, timeout=10, check=False)
             
             if result.returncode == 0:
-                log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 2)")
+                log_message('INFO', f"✅ Уведомление отправлено пользователю {username}")
                 return True
             else:
-                log_message('DEBUG', f"Метод 2 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
+                log_message('DEBUG', f"Ошибка отправки уведомления: {result.stderr.strip()}")
                 
     except Exception as e:
-        log_message('DEBUG', f"Метод 2 ошибка: {e}")
+        log_message('DEBUG', f"Ошибка при отправке уведомления: {e}")
     
-    # Метод 3: Через systemd-run для пользовательской сессии
-    try:
-        import pwd
-        user_info = pwd.getpwnam(username)
-        uid = user_info.pw_uid
-        
-        result = subprocess.run([
-            'systemd-run', '--uid', str(uid), '--gid', str(uid), 
-            '--user', '--scope', '--quiet',
-            'notify-send', '--urgency=normal', '--expire-time=5000', 
-            title, message
-        ], capture_output=True, text=True, timeout=10, check=False)
-        
-        if result.returncode == 0:
-            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 3)")
-            return True
-        else:
-            log_message('DEBUG', f"Метод 3 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
-            
-    except Exception as e:
-        log_message('DEBUG', f"Метод 3 ошибка: {e}")
-    
-    # Метод 4: Через dbus для пользователя
-    try:
-        import pwd
-        user_info = pwd.getpwnam(username)
-        uid = user_info.pw_uid
-        
-        # Создаем скрипт для отправки через dbus
-        dbus_script = f'''
-import dbus
-try:
-    bus = dbus.SessionBus()
-    notify = bus.get_object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
-    interface = dbus.Interface(notify, "org.freedesktop.Notifications")
-    interface.Notify("USB Monitor", 0, "", "{title}", "{message}", [], {{}}, 5000)
-    print("SUCCESS")
-except Exception as e:
-    print(f"ERROR: {{e}}")
-'''
-        
-        result = subprocess.run([
-            'su', '-', username, '-c', 
-            f'python3 -c \'{dbus_script}\''
-        ], capture_output=True, text=True, timeout=10, check=False)
-        
-        if result.returncode == 0 and "SUCCESS" in result.stdout:
-            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 4 - dbus)")
-            return True
-        else:
-            log_message('DEBUG', f"Метод 4 неудачен: {result.stdout.strip()}, {result.stderr.strip()}")
-            
-    except Exception as e:
-        log_message('DEBUG', f"Метод 4 ошибка: {e}")
-    
-    # Метод 5: Запись в системный лог как последний resort
+    # Метод 2: Fallback в системный лог
     try:
         subprocess.run([
             'logger', '-t', 'usb-monitor', 
             f"NOTIFICATION for {username}: {title} - {message}"
         ], check=False, timeout=5)
-        log_message('WARNING', f"⚠️ Уведомление записано в syslog для {username} (все графические методы неудачны)")
+        log_message('WARNING', f"⚠️ Уведомление записано в syslog для {username}")
         return False
         
     except Exception as e:
-        log_message('DEBUG', f"Метод 5 ошибка: {e}")
+        log_message('ERROR', f"Ошибка записи в syslog: {e}")
     
-    log_message('ERROR', f"❌ Все методы отправки уведомления неудачны для пользователя {username}")
+    log_message('ERROR', f"❌ Не удалось отправить уведомление пользователю {username}")
     return False
 
 class WebSocketClient:
