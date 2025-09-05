@@ -667,28 +667,32 @@ def mount_device(device_node):
         log_message('ERROR', f"Неожиданная ошибка при монтировании: {e}")
 
 def send_desktop_notification(username, title, message):
-    """Отправляет уведомление пользователю"""
+    """Отправляет уведомление пользователю с множественными fallback методами"""
+    log_message('DEBUG', f"📢 Попытка отправить уведомление пользователю {username}: {title}")
+    
+    # Метод 1: Простой notify-send с DISPLAY=:0
     try:
-        # Простой метод через notify-send
-        try:
-            # Пытаемся отправить уведомление напрямую
-            result = subprocess.run([
-                'sudo', '-u', username, 
-                'DISPLAY=:0', 'notify-send', 
-                '--urgency=normal', '--expire-time=5000', 
-                title, message
-            ], capture_output=True, text=True, timeout=10, check=False)
-            
-            if result.returncode == 0:
-                log_message('DEBUG', f"Уведомление отправлено пользователю {username}")
-                return
-        except Exception as e:
-            log_message('DEBUG', f"Простой метод не сработал: {e}")
+        result = subprocess.run([
+            'sudo', '-u', username, 
+            'DISPLAY=:0', 'notify-send', 
+            '--urgency=normal', '--expire-time=5000', 
+            title, message
+        ], capture_output=True, text=True, timeout=10, check=False)
         
-        # Fallback метод через поиск DISPLAY
-        display = None
-        xdg_runtime_dir = None
-        
+        if result.returncode == 0:
+            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 1)")
+            return True
+        else:
+            log_message('DEBUG', f"Метод 1 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
+    except Exception as e:
+        log_message('DEBUG', f"Метод 1 ошибка: {e}")
+    
+    # Метод 2: Поиск реального DISPLAY через /proc
+    display = None
+    xdg_runtime_dir = None
+    wayland_display = None
+    
+    try:
         for proc_dir in os.listdir('/proc'):
             if not proc_dir.isdigit():
                 continue
@@ -698,51 +702,126 @@ def send_desktop_notification(username, title, message):
                     with open(environ_path, 'rb') as f:
                         environ_data = f.read().decode('utf-8', errors='ignore')
                     
-                    if f'USER={username}' in environ_data and 'DISPLAY=' in environ_data:
+                    if f'USER={username}' in environ_data:
                         for line in environ_data.split('\0'):
                             if line.startswith('DISPLAY='):
                                 display = line.split('=', 1)[1]
                             elif line.startswith('XDG_RUNTIME_DIR='):
                                 xdg_runtime_dir = line.split('=', 1)[1]
-                        if display:
+                            elif line.startswith('WAYLAND_DISPLAY='):
+                                wayland_display = line.split('=', 1)[1]
+                        if display or wayland_display:
                             break
             except (OSError, IOError, PermissionError):
                 continue
         
-        if display:
-            # Получаем UID пользователя
-            try:
-                import pwd
-                user_info = pwd.getpwnam(username)
-                uid = user_info.pw_uid
+        if display or wayland_display:
+            import pwd
+            user_info = pwd.getpwnam(username)
+            uid = user_info.pw_uid
+            
+            # Настраиваем окружение
+            env = {
+                'USER': username,
+                'HOME': user_info.pw_dir,
+                'PATH': '/usr/local/bin:/usr/bin:/bin',
+            }
+            
+            if display:
+                env['DISPLAY'] = display
+            if wayland_display:
+                env['WAYLAND_DISPLAY'] = wayland_display
+            if xdg_runtime_dir:
+                env['XDG_RUNTIME_DIR'] = xdg_runtime_dir
+            else:
+                env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
+            
+            log_message('DEBUG', f"Найдено окружение: DISPLAY={display}, WAYLAND_DISPLAY={wayland_display}")
+            
+            # Пробуем отправить уведомление
+            result = subprocess.run([
+                'su', '-', username, '-c', 
+                f'notify-send --urgency=normal --expire-time=5000 "{title}" "{message}"'
+            ], env=env, capture_output=True, text=True, timeout=10, check=False)
+            
+            if result.returncode == 0:
+                log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 2)")
+                return True
+            else:
+                log_message('DEBUG', f"Метод 2 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
                 
-                # Настраиваем окружение для уведомления
-                env = {
-                    'DISPLAY': display,
-                    'USER': username,
-                    'HOME': user_info.pw_dir,
-                }
-                
-                if xdg_runtime_dir:
-                    env['XDG_RUNTIME_DIR'] = xdg_runtime_dir
-                else:
-                    env['XDG_RUNTIME_DIR'] = f'/run/user/{uid}'
-                
-                # Отправляем уведомление используя su
-                subprocess.run([
-                    'su', '-', username, '-c', 
-                    f'DISPLAY={display} notify-send --urgency=normal --expire-time=5000 "{title}" "{message}"'
-                ], env=env, check=False, timeout=10)
-                
-                log_message('DEBUG', f"Уведомление отправлено пользователю {username}")
-                
-            except (KeyError, subprocess.TimeoutExpired) as e:
-                log_message('WARNING', f"Не удалось отправить уведомление: {e}")
+    except Exception as e:
+        log_message('DEBUG', f"Метод 2 ошибка: {e}")
+    
+    # Метод 3: Через systemd-run для пользовательской сессии
+    try:
+        import pwd
+        user_info = pwd.getpwnam(username)
+        uid = user_info.pw_uid
+        
+        result = subprocess.run([
+            'systemd-run', '--uid', str(uid), '--gid', str(uid), 
+            '--user', '--scope', '--quiet',
+            'notify-send', '--urgency=normal', '--expire-time=5000', 
+            title, message
+        ], capture_output=True, text=True, timeout=10, check=False)
+        
+        if result.returncode == 0:
+            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 3)")
+            return True
         else:
-            log_message('WARNING', f"Не удалось найти DISPLAY для пользователя {username}")
+            log_message('DEBUG', f"Метод 3 неудачен: код {result.returncode}, stderr: {result.stderr.strip()}")
             
     except Exception as e:
-        log_message('ERROR', f"Ошибка отправки уведомления: {e}")
+        log_message('DEBUG', f"Метод 3 ошибка: {e}")
+    
+    # Метод 4: Через dbus для пользователя
+    try:
+        import pwd
+        user_info = pwd.getpwnam(username)
+        uid = user_info.pw_uid
+        
+        # Создаем скрипт для отправки через dbus
+        dbus_script = f'''
+import dbus
+try:
+    bus = dbus.SessionBus()
+    notify = bus.get_object("org.freedesktop.Notifications", "/org/freedesktop/Notifications")
+    interface = dbus.Interface(notify, "org.freedesktop.Notifications")
+    interface.Notify("USB Monitor", 0, "", "{title}", "{message}", [], {{}}, 5000)
+    print("SUCCESS")
+except Exception as e:
+    print(f"ERROR: {{e}}")
+'''
+        
+        result = subprocess.run([
+            'su', '-', username, '-c', 
+            f'python3 -c \'{dbus_script}\''
+        ], capture_output=True, text=True, timeout=10, check=False)
+        
+        if result.returncode == 0 and "SUCCESS" in result.stdout:
+            log_message('INFO', f"✅ Уведомление отправлено пользователю {username} (метод 4 - dbus)")
+            return True
+        else:
+            log_message('DEBUG', f"Метод 4 неудачен: {result.stdout.strip()}, {result.stderr.strip()}")
+            
+    except Exception as e:
+        log_message('DEBUG', f"Метод 4 ошибка: {e}")
+    
+    # Метод 5: Запись в системный лог как последний resort
+    try:
+        subprocess.run([
+            'logger', '-t', 'usb-monitor', 
+            f"NOTIFICATION for {username}: {title} - {message}"
+        ], check=False, timeout=5)
+        log_message('WARNING', f"⚠️ Уведомление записано в syslog для {username} (все графические методы неудачны)")
+        return False
+        
+    except Exception as e:
+        log_message('DEBUG', f"Метод 5 ошибка: {e}")
+    
+    log_message('ERROR', f"❌ Все методы отправки уведомления неудачны для пользователя {username}")
+    return False
 
 class WebSocketClient:
     """WebSocket клиент для получения уведомлений от сервера"""
@@ -763,13 +842,16 @@ class WebSocketClient:
         """Подключается к WebSocket серверу"""
         try:
             server_url = self.server_config['server_url']
-            log_message('INFO', f"Подключение к WebSocket серверу: {server_url}")
+            log_message('INFO', f"Попытка подключения к WebSocket серверу: {server_url}")
+            log_message('DEBUG', f"SSL verify: {self.server_config.get('ssl_verify', False)}")
             
             self.sio.connect(server_url)
+            log_message('INFO', f"WebSocket подключение установлено успешно")
             return True
             
         except Exception as e:
             log_message('ERROR', f"Ошибка подключения к WebSocket: {e}")
+            log_message('DEBUG', f"Детали ошибки WebSocket: {type(e).__name__}: {str(e)}")
             return False
     
     def disconnect(self):
@@ -785,10 +867,13 @@ class WebSocketClient:
         try:
             if self.connected:
                 self.current_user = username
+                log_message('DEBUG', f"Отправляем событие join_user для пользователя: {username}")
                 self.sio.emit('join_user', {'username': username})
-                log_message('DEBUG', f"Присоединились к комнате пользователя: {username}")
+                log_message('INFO', f"Присоединились к комнате пользователя: {username}")
+            else:
+                log_message('WARNING', f"Попытка присоединиться к комнате {username}, но WebSocket не подключен")
         except Exception as e:
-            log_message('ERROR', f"Ошибка присоединения к комнате пользователя: {e}")
+            log_message('ERROR', f"Ошибка присоединения к комнате пользователя {username}: {e}")
     
     def on_connect(self):
         """Обработчик подключения"""
@@ -810,22 +895,27 @@ class WebSocketClient:
             username = data.get('username')
             request_id = data.get('request_id')
             
-            log_message('INFO', f"Получено одобрение запроса {request_id} для пользователя {username}")
+            log_message('INFO', f"🟢 WebSocket: Получено одобрение запроса {request_id} для пользователя {username}")
+            log_message('DEBUG', f"Данные события одобрения: {data}")
+            log_message('DEBUG', f"Текущие pending_devices: {list(_pending_devices.keys())}")
+            log_message('DEBUG', f"Текущие pending_requests: {_pending_requests}")
             
             # Ищем соответствующее устройство в pending_devices
             device_to_mount = None
             device_key_to_remove = None
             
             for device_key, device_info in _pending_devices.items():
+                log_message('DEBUG', f"Проверяем устройство {device_key}: username={device_info.get('username')}")
                 if device_info.get('username') == username:
                     # Проверяем, соответствует ли это устройство запросу
                     if device_key in _pending_requests and _pending_requests[device_key] == request_id:
                         device_to_mount = device_info
                         device_key_to_remove = device_key
+                        log_message('DEBUG', f"Найдено соответствующее устройство: {device_key}")
                         break
             
             if device_to_mount:
-                log_message('INFO', f"Автоматически монтируем одобренное устройство: {device_to_mount['device_node']}")
+                log_message('INFO', f"🔧 Автоматически монтируем одобренное устройство: {device_to_mount['device_node']}")
                 
                 # Отправляем уведомление пользователю
                 send_desktop_notification(
@@ -842,11 +932,18 @@ class WebSocketClient:
                     del _pending_devices[device_key_to_remove]
                     if device_key_to_remove in _pending_requests:
                         del _pending_requests[device_key_to_remove]
+                    log_message('DEBUG', f"Очищены pending данные для {device_key_to_remove}")
             else:
-                log_message('WARNING', f"Не найдено устройство для одобренного запроса {request_id}")
+                log_message('WARNING', f"❌ Не найдено устройство для одобренного запроса {request_id}")
+                log_message('DEBUG', f"Доступные устройства для пользователя {username}:")
+                for device_key, device_info in _pending_devices.items():
+                    if device_info.get('username') == username:
+                        log_message('DEBUG', f"  - {device_key}: request_id={_pending_requests.get(device_key, 'N/A')}")
                 
         except Exception as e:
             log_message('ERROR', f"Ошибка обработки одобрения запроса: {e}")
+            import traceback
+            log_message('DEBUG', f"Traceback: {traceback.format_exc()}")
     
     def on_request_denied(self, data):
         """Обработчик отклонения запроса"""
@@ -895,6 +992,14 @@ def start_websocket_client(server_config):
             max_attempts = 5
             for attempt in range(max_attempts):
                 if _websocket_client.connect():
+                    # После успешного подключения присоединяемся к комнате активного пользователя
+                    time.sleep(2)  # Даем время на установку соединения
+                    current_user = get_active_user()
+                    if current_user:
+                        log_message('INFO', f"Присоединяемся к комнате активного пользователя: {current_user}")
+                        _websocket_client.join_user_room(current_user)
+                    else:
+                        log_message('WARNING', "Не удалось определить активного пользователя для WebSocket комнаты")
                     break
                 else:
                     if attempt < max_attempts - 1:
@@ -910,7 +1015,12 @@ def start_websocket_client(server_config):
                     time.sleep(30)  # Проверяем соединение каждые 30 секунд
                     if not _websocket_client.connected:
                         log_message('WARNING', "WebSocket соединение потеряно, пытаемся переподключиться")
-                        _websocket_client.connect()
+                        if _websocket_client.connect():
+                            # После переподключения снова присоединяемся к комнате
+                            time.sleep(2)
+                            current_user = get_active_user()
+                            if current_user:
+                                _websocket_client.join_user_room(current_user)
                 except Exception as e:
                     log_message('ERROR', f"Ошибка в WebSocket потоке: {e}")
                     time.sleep(10)
