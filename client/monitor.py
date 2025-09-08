@@ -91,7 +91,6 @@ def check_device_permission_server(username, vid, pid, serial, server_config):
     
     for attempt in range(server_config['retry_attempts']):
         try:
-            log_message('DEBUG', f"Запрос к серверу (попытка {attempt + 1}): {url}")
             response = requests.post(
                 url, 
                 json=data, 
@@ -351,8 +350,6 @@ def _get_user_via_proc():
 
 def wait_for_device_ready(device_node, timeout=10):
     """Ожидает готовности устройства к монтированию"""
-    log_message('DEBUG', f"Ожидаем готовности устройства {device_node}")
-    
     for attempt in range(timeout):
         try:
             # Проверяем, что устройство существует и доступно для чтения
@@ -360,14 +357,111 @@ def wait_for_device_ready(device_node, timeout=10):
                 # Пытаемся прочитать первые байты устройства
                 with open(device_node, 'rb') as f:
                     f.read(512)  # Читаем первый сектор
-                log_message('DEBUG', f"Устройство {device_node} готово к монтированию")
                 return True
-        except (OSError, IOError) as e:
-            log_message('DEBUG', f"Устройство {device_node} не готово (попытка {attempt + 1}): {e}")
+        except (OSError, IOError):
+            pass
         
         time.sleep(1)
     
     log_message('WARNING', f"Устройство {device_node} не готово после {timeout} секунд ожидания")
+    return False
+
+def force_close_mount_point(mount_point):
+    """Принудительно закрывает процессы, использующие точку монтирования"""
+    try:
+        # Проверяем, какие процессы используют точку монтирования
+        lsof_result = subprocess.run(
+            ['lsof', '+D', mount_point], 
+            capture_output=True, text=True, check=False
+        )
+        
+        if lsof_result.returncode == 0 and lsof_result.stdout.strip():
+            log_message('WARNING', f"Найдены процессы, использующие {mount_point}")
+            
+            # Сначала пытаемся мягко завершить процессы (SIGTERM)
+            fuser_result = subprocess.run(
+                ['fuser', '-m', mount_point], 
+                capture_output=True, text=True, check=False
+            )
+            
+            if fuser_result.returncode == 0:
+                log_message('INFO', f"Отправляем SIGTERM процессам, использующим {mount_point}")
+                subprocess.run(['fuser', '-k', '-TERM', mount_point], 
+                             capture_output=True, check=False)
+                
+                # Ждем 3 секунды для корректного завершения
+                time.sleep(3)
+                
+                # Проверяем, остались ли процессы
+                check_result = subprocess.run(
+                    ['fuser', '-m', mount_point], 
+                    capture_output=True, text=True, check=False
+                )
+                
+                if check_result.returncode == 0:
+                    log_message('WARNING', f"Процессы не завершились, отправляем SIGKILL")
+                    subprocess.run(['fuser', '-k', '-KILL', mount_point], 
+                                 capture_output=True, check=False)
+                    time.sleep(1)
+                
+                return True
+        
+        return False
+        
+    except Exception as e:
+        log_message('WARNING', f"Ошибка при принудительном закрытии процессов для {mount_point}: {e}")
+        return False
+
+def safe_remove_mount_point(mount_point, max_attempts=3):
+    """Безопасно удаляет точку монтирования с повторными попытками"""
+    for attempt in range(max_attempts):
+        try:
+            if not os.path.exists(mount_point):
+                return True
+                
+            if not os.path.isdir(mount_point):
+                log_message('WARNING', f"Точка монтирования {mount_point} не является директорией")
+                return False
+            
+            # Проверяем, что папка пустая
+            if os.listdir(mount_point):
+                if attempt == 0:  # Только при первой попытке пытаемся закрыть процессы
+                    log_message('INFO', f"Точка монтирования {mount_point} не пустая, пытаемся закрыть процессы")
+                    if force_close_mount_point(mount_point):
+                        time.sleep(2)  # Даем время на освобождение ресурсов
+                        continue
+                
+                log_message('WARNING', f"Точка монтирования {mount_point} не пустая (попытка {attempt + 1})")
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    return False
+            
+            # Пытаемся удалить пустую директорию
+            os.rmdir(mount_point)
+            log_message('INFO', f"Удалена точка монтирования: {mount_point}")
+            return True
+            
+        except OSError as e:
+            if e.errno == 16:  # Device or resource busy
+                if attempt == 0:
+                    log_message('INFO', f"Точка монтирования {mount_point} занята, пытаемся освободить")
+                    if force_close_mount_point(mount_point):
+                        time.sleep(2)
+                        continue
+                
+                log_message('WARNING', f"Точка монтирования {mount_point} занята (попытка {attempt + 1})")
+                if attempt < max_attempts - 1:
+                    time.sleep(2)
+                    continue
+            else:
+                log_message('WARNING', f"Ошибка удаления {mount_point}: {e}")
+                break
+        except Exception as e:
+            log_message('WARNING', f"Неожиданная ошибка при удалении {mount_point}: {e}")
+            break
+    
     return False
 
 def unmount_device(device_node):
@@ -387,41 +481,37 @@ def unmount_device(device_node):
                     mount_point = parts[1].split(' type ')[0].strip()
                     if mount_point:  # Проверяем, что точка монтирования не пустая
                         mount_points.add(mount_point)
-                        log_message('DEBUG', f"Найдена точка монтирования: {mount_point}")
+        
+        if not mount_points:
+            log_message('INFO', f"Точки монтирования для {device_node} не найдены")
+            return
+        
+        log_message('INFO', f"Найдено точек монтирования: {len(mount_points)}")
         
         # Размонтируем каждую найденную точку
         for mount_point in mount_points:
             try:
                 # Проверяем, что точка монтирования еще существует
                 if not os.path.exists(mount_point):
-                    log_message('DEBUG', f"Точка монтирования {mount_point} уже не существует")
                     continue
                 
                 # Используем nsenter для размонтирования в основном namespace
                 umount_cmd = ['/usr/bin/nsenter', '-t', '1', '-m', '/bin/umount', mount_point]
                 
-                log_message('DEBUG', f"Выполняем размонтирование: {' '.join(umount_cmd)}")
                 result = subprocess.run(umount_cmd, capture_output=True, text=True, check=False)
                 
                 if result.returncode == 0:
                     log_message('INFO', f"Устройство {device_node} размонтировано из {mount_point}")
                     
-                    # Удаляем пустую точку монтирования
-                    try:
-                        if os.path.exists(mount_point) and os.path.isdir(mount_point):
-                            # Проверяем, что папка пустая
-                            if not os.listdir(mount_point):
-                                os.rmdir(mount_point)
-                                log_message('DEBUG', f"Удалена точка монтирования: {mount_point}")
-                            else:
-                                log_message('DEBUG', f"Точка монтирования не пустая, оставляем: {mount_point}")
-                    except Exception as e:
-                        log_message('DEBUG', f"Не удалось удалить точку монтирования {mount_point}: {e}")
+                    # Безопасно удаляем точку монтирования
+                    safe_remove_mount_point(mount_point)
                         
                 else:
                     # Проверяем, не была ли точка уже размонтирована
                     if "not mounted" in result.stderr or "no mount point" in result.stderr:
-                        log_message('DEBUG', f"Точка {mount_point} уже размонтирована")
+                        log_message('INFO', f"Точка {mount_point} уже размонтирована")
+                        # Все равно пытаемся удалить директорию
+                        safe_remove_mount_point(mount_point)
                     else:
                         log_message('ERROR', f"Ошибка размонтирования {mount_point}: {result.stderr.strip()}")
                     
@@ -578,13 +668,6 @@ def mount_device(device_node):
         # Это обходит изоляцию mount namespace в systemd
         mount_cmd = ['/usr/bin/nsenter', '-t', '1', '-m', '/bin/mount', '-o', mount_options, device_node, mount_point]
         
-        # Детальное логирование перед выполнением
-        log_message('DEBUG', f"Выполняем команду монтирования через nsenter: {' '.join(mount_cmd)}")
-        log_message('DEBUG', f"Рабочая директория: {os.getcwd()}")
-        log_message('DEBUG', f"Устройство существует: {os.path.exists(device_node)}")
-        log_message('DEBUG', f"Точка монтирования существует: {os.path.exists(mount_point)}")
-        log_message('DEBUG', f"Права на точку монтирования: {oct(os.stat(mount_point).st_mode)[-3:] if os.path.exists(mount_point) else 'N/A'}")
-        
         # Настраиваем окружение с полным PATH
         env = os.environ.copy()
         env['PATH'] = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -597,13 +680,6 @@ def mount_device(device_node):
             check=False,
             env=env
         )
-        
-        # Логируем результат выполнения
-        log_message('DEBUG', f"Код возврата mount: {result.returncode}")
-        if result.stdout:
-            log_message('DEBUG', f"STDOUT mount: {result.stdout.strip()}")
-        if result.stderr:
-            log_message('DEBUG', f"STDERR mount: {result.stderr.strip()}")
         
         # Проверяем успешность монтирования
         if result.returncode == 0:
@@ -618,7 +694,6 @@ def mount_device(device_node):
             for line in mount_check.stdout.splitlines():
                 if device_node in line:
                     device_mounted = True
-                    log_message('DEBUG', f"Найдена строка монтирования: {line.strip()}")
                 if mount_point in line:
                     mount_point_used = True
             
@@ -628,19 +703,17 @@ def mount_device(device_node):
                     proc_mounts = f.read()
                     if device_node in proc_mounts:
                         device_mounted = True
-                        log_message('DEBUG', f"Устройство найдено в /proc/mounts")
-            except Exception as e:
-                log_message('DEBUG', f"Не удалось прочитать /proc/mounts: {e}")
+            except Exception:
+                pass
             
             # Проверяем, есть ли файлы в точке монтирования
             try:
                 if os.path.exists(mount_point):
                     files_in_mount = os.listdir(mount_point)
                     if files_in_mount:
-                        log_message('DEBUG', f"В точке монтирования найдены файлы: {files_in_mount[:5]}")  # Первые 5 файлов
                         device_mounted = True
-            except Exception as e:
-                log_message('DEBUG', f"Не удалось проверить содержимое точки монтирования: {e}")
+            except Exception:
+                pass
             
             if device_mounted or mount_point_used:
                 log_message('INFO', f"Устройство {device_node} успешно смонтировано в: {mount_point}")
@@ -651,20 +724,6 @@ def mount_device(device_node):
                     subprocess.run(["/bin/chmod", "755", mount_point], check=False)
             else:
                 log_message('ERROR', f"Команда mount завершилась успешно, но устройство не найдено в списке смонтированных")
-                log_message('DEBUG', f"Полный вывод mount: {mount_check.stdout}")
-                
-                # Пытаемся выяснить причину
-                log_message('DEBUG', "Дополнительная диагностика:")
-                
-                # Проверяем dmesg на ошибки
-                try:
-                    dmesg_result = subprocess.run(['/bin/dmesg', '-T'], capture_output=True, text=True, timeout=5)
-                    recent_lines = dmesg_result.stdout.splitlines()[-20:]  # Последние 20 строк
-                    for line in recent_lines:
-                        if any(keyword in line.lower() for keyword in ['error', 'fail', 'mount', device_node.split('/')[-1]]):
-                            log_message('DEBUG', f"dmesg: {line.strip()}")
-                except Exception as e:
-                    log_message('DEBUG', f"Не удалось получить dmesg: {e}")
         else:
             log_message('ERROR', f"Ошибка монтирования {device_node}: код возврата {result.returncode}")
             if result.stderr:
@@ -780,15 +839,11 @@ class WebSocketClient:
         try:
             server_url = self.server_config['server_url']
             log_message('INFO', f"🔌 Попытка подключения к WebSocket серверу: {server_url}")
-            log_message('DEBUG', f"SSL verify: {self.server_config.get('ssl_verify', False)}")
-            log_message('DEBUG', f"Timeout: {self.server_config.get('timeout', 10)}")
             
             # Дополнительные настройки для socketio клиента
             connect_kwargs = {
                 'wait_timeout': self.server_config.get('timeout', 10)
             }
-            
-            log_message('DEBUG', f"Параметры подключения: {connect_kwargs}")
             
             self.sio.connect(server_url, **connect_kwargs)
             log_message('INFO', f"✅ WebSocket подключение установлено успешно")
@@ -796,31 +851,6 @@ class WebSocketClient:
             
         except Exception as e:
             log_message('ERROR', f"❌ Ошибка подключения к WebSocket: {e}")
-            log_message('DEBUG', f"Детали ошибки WebSocket: {type(e).__name__}: {str(e)}")
-            
-            # Дополнительная диагностика
-            try:
-                import socket
-                from urllib.parse import urlparse
-                
-                parsed_url = urlparse(self.server_config['server_url'])
-                host = parsed_url.hostname
-                port = parsed_url.port or (443 if parsed_url.scheme == 'https' else 80)
-                
-                log_message('DEBUG', f"Проверка доступности {host}:{port}")
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5)
-                result = sock.connect_ex((host, port))
-                sock.close()
-                
-                if result == 0:
-                    log_message('DEBUG', f"Порт {host}:{port} доступен")
-                else:
-                    log_message('DEBUG', f"Порт {host}:{port} недоступен (код: {result})")
-                    
-            except Exception as diag_e:
-                log_message('DEBUG', f"Ошибка диагностики: {diag_e}")
-            
             return False
     
     def disconnect(self):
@@ -836,7 +866,6 @@ class WebSocketClient:
         try:
             if self.connected:
                 self.current_user = username
-                log_message('DEBUG', f"Отправляем событие join_user для пользователя: {username}")
                 self.sio.emit('join_user', {'username': username})
                 log_message('INFO', f"Присоединились к комнате пользователя: {username}")
             else:
