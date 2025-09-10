@@ -158,6 +158,9 @@ dev_*.db
 development_*.db
 test_*.db
 
+# Development docs
+planning/
+
 # Temporary files
 *.tmp
 *.bak
