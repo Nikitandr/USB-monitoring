@@ -6,7 +6,7 @@
 set -e
 
 # Проверяем права root
-if [[ $EUID -ne 0 ]]; then
+if [ "$(id -u)" -ne 0 ]; then
    echo "Этот скрипт должен запускаться от root (sudo)" 
    exit 1
 fi
@@ -14,7 +14,7 @@ fi
 echo "=== Установка USB Monitor Client ==="
 
 # Определяем пути
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="/opt/usb-monitor"
 BIN_PATH="/usr/local/bin/usb-monitor"
 SERVICE_PATH="/etc/systemd/system/usb-monitor.service"
@@ -50,10 +50,14 @@ if ! grep -q "Ubuntu 22.04" /etc/os-release 2>/dev/null; then
     echo "Текущая система: $(lsb_release -d 2>/dev/null || echo 'Неизвестно')"
     read -p "Продолжить установку? (y/N): " -n 1 -r
     echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Установка отменена"
-        exit 1
-    fi
+    case "$REPLY" in
+        [Yy]|[Yy][Ee][Ss])
+            ;;
+        *)
+            echo "Установка отменена"
+            exit 1
+            ;;
+    esac
 fi
 
 # Устанавливаем зависимости через apt
@@ -61,23 +65,19 @@ echo "Обновление списка пакетов..."
 apt-get update
 
 echo "Установка зависимостей..."
-REQUIRED_PACKAGES=(
-    "python3"
-    "python3-pyudev"
-    "python3-yaml" 
-    "python3-requests"
-    "python3-pydbus"
-    "python3-gi"
-    "python3-socketio"
-    "python3-websocket-client"
-    "libnotify-bin"
-    "policykit-1"
-    "udev"
-    "systemd"
-)
-
 # Устанавливаем все пакеты одной командой
-apt-get install -y "${REQUIRED_PACKAGES[@]}"
+apt-get install -y \
+    python3 \
+    python3-pyudev \
+    python3-yaml \
+    python3-requests \
+    python3-pydbus \
+    python3-gi \
+    python3-socketio \
+    libnotify-bin \
+    policykit-1 \
+    udev \
+    systemd
 
 # Проверяем, что все критически важные пакеты установлены
 echo "Проверка установленных зависимостей..."
@@ -93,7 +93,7 @@ python3 -c "import socketio" 2>/dev/null || FAILED_IMPORTS="$FAILED_IMPORTS sock
 if [ -n "$FAILED_IMPORTS" ]; then
     echo "ОШИБКА: Не удалось импортировать модули:$FAILED_IMPORTS"
     echo "Попробуйте установить недостающие пакеты вручную:"
-    echo "  sudo apt-get install python3-pyudev python3-yaml python3-requests python3-pydbus python3-gi"
+    echo "  sudo apt-get install python3-pyudev python3-yaml python3-requests python3-pydbus python3-gi python3-socketio"
     exit 1
 fi
 
