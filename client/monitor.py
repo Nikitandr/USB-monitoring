@@ -840,12 +840,8 @@ class WebSocketClient:
             server_url = self.server_config['server_url']
             log_message('INFO', f"🔌 Попытка подключения к WebSocket серверу: {server_url}")
             
-            # Дополнительные настройки для socketio клиента
-            connect_kwargs = {
-                'wait_timeout': self.server_config.get('timeout', 10)
-            }
-            
-            self.sio.connect(server_url, **connect_kwargs)
+            # Подключаемся без дополнительных параметров (совместимость с socketio 5.x)
+            self.sio.connect(server_url)
             log_message('INFO', f"✅ WebSocket подключение установлено успешно")
             return True
             
