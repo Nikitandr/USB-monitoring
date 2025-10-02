@@ -205,58 +205,7 @@ def find_fs_object_path(bus, device_node):
     return None
 
 def get_active_user():
-    """
-    Определяет активного пользователя с использованием нескольких методов fallback.
-    Возвращает имя пользователя или None, если не удалось определить.
-    """
-    log_message('DEBUG', "=== Начинаем определение активного пользователя ===")
-    
-    # Метод 1: loginctl (основной)
-    log_message('DEBUG', "Попытка метода 1: loginctl (systemd-logind)")
-    user = _get_user_via_loginctl()
-    if user:
-        log_message('INFO', f"✅ Метод 1 (loginctl) УСПЕШЕН: пользователь '{user}'")
-        log_message('DEBUG', "=== Определение пользователя завершено ===")
-        return user
-    else:
-        log_message('DEBUG', "❌ Метод 1 (loginctl) не дал результата")
-    
-    # Метод 2: who команда
-    log_message('DEBUG', "Попытка метода 2: команда 'who'")
-    user = _get_user_via_who()
-    if user:
-        log_message('INFO', f"✅ Метод 2 (who) УСПЕШЕН: пользователь '{user}'")
-        log_message('DEBUG', "=== Определение пользователя завершено ===")
-        return user
-    else:
-        log_message('DEBUG', "❌ Метод 2 (who) не дал результата")
-    
-    # Метод 3: анализ X11 сессий
-    log_message('DEBUG', "Попытка метода 3: анализ X11 процессов")
-    user = _get_user_via_x11()
-    if user:
-        log_message('INFO', f"✅ Метод 3 (X11) УСПЕШЕН: пользователь '{user}'")
-        log_message('DEBUG', "=== Определение пользователя завершено ===")
-        return user
-    else:
-        log_message('DEBUG', "❌ Метод 3 (X11) не дал результата")
-    
-    # Метод 4: проверка /proc/*/environ для графических процессов
-    log_message('DEBUG', "Попытка метода 4: анализ /proc/*/environ")
-    user = _get_user_via_proc()
-    if user:
-        log_message('INFO', f"✅ Метод 4 (proc) УСПЕШЕН: пользователь '{user}'")
-        log_message('DEBUG', "=== Определение пользователя завершено ===")
-        return user
-    else:
-        log_message('DEBUG', "❌ Метод 4 (proc) не дал результата")
-    
-    log_message('WARNING', "❌ ВСЕ МЕТОДЫ определения пользователя провалились!")
-    log_message('DEBUG', "=== Определение пользователя завершено с ошибкой ===")
-    return None
-
-def _get_user_via_loginctl():
-    """Определение пользователя через loginctl"""
+    """Определяет активного пользователя через loginctl (systemd-logind)"""
     try:
         out = subprocess.check_output(
             ["loginctl", "list-sessions", "--no-legend"],
@@ -299,77 +248,6 @@ def _get_user_via_loginctl():
             session_type in ["x11", "wayland", "tty"] and user):
             return user
 
-    return None
-
-def _get_user_via_who():
-    """Определение пользователя через команду who"""
-    try:
-        out = subprocess.check_output(["who"], stderr=subprocess.DEVNULL).decode('utf-8')
-        for line in out.splitlines():
-            parts = line.split()
-            if len(parts) >= 2:
-                user = parts[0]
-                terminal = parts[1]
-                # Ищем пользователей на графических терминалах
-                if terminal.startswith((':0', 'tty7', 'tty1')) and user != 'root':
-                    return user
-    except subprocess.CalledProcessError:
-        pass
-    return None
-
-def _get_user_via_x11():
-    """Определение пользователя через анализ X11 процессов"""
-    try:
-        # Ищем процессы X сервера
-        out = subprocess.check_output(
-            ["ps", "aux"], stderr=subprocess.DEVNULL
-        ).decode('utf-8')
-        
-        for line in out.splitlines():
-            if '/usr/bin/X' in line or 'Xorg' in line:
-                parts = line.split()
-                if len(parts) > 0:
-                    user = parts[0]
-                    if user != 'root':
-                        return user
-    except subprocess.CalledProcessError:
-        pass
-    return None
-
-def _get_user_via_proc():
-    """Определение пользователя через анализ /proc для графических процессов"""
-    try:
-        # Ищем процессы с DISPLAY переменной
-        for proc_dir in os.listdir('/proc'):
-            if not proc_dir.isdigit():
-                continue
-            
-            try:
-                environ_path = f'/proc/{proc_dir}/environ'
-                if os.path.exists(environ_path):
-                    with open(environ_path, 'rb') as f:
-                        environ_data = f.read().decode('utf-8', errors='ignore')
-                        
-                    if 'DISPLAY=' in environ_data:
-                        # Получаем владельца процесса
-                        stat_path = f'/proc/{proc_dir}/stat'
-                        if os.path.exists(stat_path):
-                            stat_info = os.stat(stat_path)
-                            uid = stat_info.st_uid
-                            
-                            # Конвертируем UID в имя пользователя
-                            import pwd
-                            try:
-                                user_info = pwd.getpwuid(uid)
-                                user = user_info.pw_name
-                                if user != 'root':
-                                    return user
-                            except KeyError:
-                                continue
-            except (OSError, IOError, PermissionError):
-                continue
-    except OSError:
-        pass
     return None
 
 def wait_for_device_ready(device_node, timeout=10):
