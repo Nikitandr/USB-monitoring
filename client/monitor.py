@@ -182,7 +182,6 @@ def check_device_policy(username, vid, pid, serial, device_info, cfg):
     log_message('WARNING', "Сервер недоступен - блокируем все USB устройства для безопасности")
     return 'deny'
 
-
 def get_active_user():
     """Определяет активного пользователя через loginctl (systemd-logind)"""
     try:
@@ -228,24 +227,6 @@ def get_active_user():
             return user
 
     return None
-
-def wait_for_device_ready(device_node, timeout=10):
-    """Ожидает готовности устройства к монтированию"""
-    for attempt in range(timeout):
-        try:
-            # Проверяем, что устройство существует и доступно для чтения
-            if os.path.exists(device_node) and os.access(device_node, os.R_OK):
-                # Пытаемся прочитать первые байты устройства
-                with open(device_node, 'rb') as f:
-                    f.read(512)  # Читаем первый сектор
-                return True
-        except (OSError, IOError):
-            pass
-        
-        time.sleep(1)
-    
-    log_message('WARNING', f"Устройство {device_node} не готово после {timeout} секунд ожидания")
-    return False
 
 def force_close_mount_point(mount_point):
     """Принудительно закрывает процессы, использующие точку монтирования"""
@@ -402,42 +383,6 @@ def unmount_device(device_node):
     except Exception as e:
         log_message('ERROR', f"Ошибка при поиске точек монтирования для {device_node}: {e}")
 
-def cleanup_stale_mount_points():
-    """Очищает старые неиспользуемые точки монтирования при запуске"""
-    log_message('INFO', "Очистка старых точек монтирования")
-    
-    try:
-        # Получаем список всех смонтированных устройств
-        mount_check = subprocess.run(['/bin/mount'], capture_output=True, text=True)
-        mounted_points = set()
-        
-        for line in mount_check.stdout.splitlines():
-            if '/media/' in line:
-                parts = line.split(' on ')
-                if len(parts) >= 2:
-                    mount_point = parts[1].split(' type ')[0]
-                    mounted_points.add(mount_point)
-        
-        # Проверяем папки в /media/
-        if os.path.exists('/media'):
-            for user_dir in os.listdir('/media'):
-                user_media_path = os.path.join('/media', user_dir)
-                if os.path.isdir(user_media_path):
-                    for mount_dir in os.listdir(user_media_path):
-                        mount_path = os.path.join(user_media_path, mount_dir)
-                        if os.path.isdir(mount_path) and mount_path not in mounted_points:
-                            try:
-                                # Проверяем, что папка пустая
-                                if not os.listdir(mount_path):
-                                    os.rmdir(mount_path)
-                                    log_message('DEBUG', f"Удалена неиспользуемая точка монтирования: {mount_path}")
-                                else:
-                                    log_message('DEBUG', f"Точка монтирования не пустая, оставляем: {mount_path}")
-                            except Exception as e:
-                                log_message('WARNING', f"Не удалось удалить {mount_path}: {e}")
-                                
-    except Exception as e:
-        log_message('ERROR', f"Ошибка при очистке точек монтирования: {e}")
 
 def get_device_info_for_notification(device):
     """Получает информацию об устройстве для уведомлений"""
@@ -451,11 +396,6 @@ def get_device_info_for_notification(device):
 
 def mount_device(device_node):
     """Монтирует USB устройство через nsenter"""
-    # Ждем готовности устройства
-    if not wait_for_device_ready(device_node):
-        log_message('ERROR', f"Устройство {device_node} не готово к монтированию")
-        return
-
     # Получаем имя активного пользователя
     user = get_active_user()
     if not user:
@@ -825,9 +765,6 @@ def main():
     check_root()
     
     log_message('INFO', "Запуск USB Monitor Client")
-
-    # Очищаем старые точки монтирования при запуске
-    cleanup_stale_mount_points()
 
     # Загружаем конфигурацию
     cfg = load_config()
