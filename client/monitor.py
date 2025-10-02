@@ -209,26 +209,50 @@ def get_active_user():
     Определяет активного пользователя с использованием нескольких методов fallback.
     Возвращает имя пользователя или None, если не удалось определить.
     """
+    log_message('DEBUG', "=== Начинаем определение активного пользователя ===")
+    
     # Метод 1: loginctl (основной)
+    log_message('DEBUG', "Попытка метода 1: loginctl (systemd-logind)")
     user = _get_user_via_loginctl()
     if user:
+        log_message('INFO', f"✅ Метод 1 (loginctl) УСПЕШЕН: пользователь '{user}'")
+        log_message('DEBUG', "=== Определение пользователя завершено ===")
         return user
+    else:
+        log_message('DEBUG', "❌ Метод 1 (loginctl) не дал результата")
     
     # Метод 2: who команда
+    log_message('DEBUG', "Попытка метода 2: команда 'who'")
     user = _get_user_via_who()
     if user:
+        log_message('INFO', f"✅ Метод 2 (who) УСПЕШЕН: пользователь '{user}'")
+        log_message('DEBUG', "=== Определение пользователя завершено ===")
         return user
+    else:
+        log_message('DEBUG', "❌ Метод 2 (who) не дал результата")
     
     # Метод 3: анализ X11 сессий
+    log_message('DEBUG', "Попытка метода 3: анализ X11 процессов")
     user = _get_user_via_x11()
     if user:
+        log_message('INFO', f"✅ Метод 3 (X11) УСПЕШЕН: пользователь '{user}'")
+        log_message('DEBUG', "=== Определение пользователя завершено ===")
         return user
+    else:
+        log_message('DEBUG', "❌ Метод 3 (X11) не дал результата")
     
     # Метод 4: проверка /proc/*/environ для графических процессов
+    log_message('DEBUG', "Попытка метода 4: анализ /proc/*/environ")
     user = _get_user_via_proc()
     if user:
+        log_message('INFO', f"✅ Метод 4 (proc) УСПЕШЕН: пользователь '{user}'")
+        log_message('DEBUG', "=== Определение пользователя завершено ===")
         return user
+    else:
+        log_message('DEBUG', "❌ Метод 4 (proc) не дал результата")
     
+    log_message('WARNING', "❌ ВСЕ МЕТОДЫ определения пользователя провалились!")
+    log_message('DEBUG', "=== Определение пользователя завершено с ошибкой ===")
     return None
 
 def _get_user_via_loginctl():
