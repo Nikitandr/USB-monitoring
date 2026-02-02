@@ -5,8 +5,9 @@ from typing import Optional, List, Dict, Any
 class BaseModel:
     """Базовый класс для всех моделей"""
     
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, crypto_manager=None):
         self.db_path = db_path
+        self.crypto = crypto_manager
     
     def get_connection(self):
         """Получение соединения с базой данных"""
@@ -34,28 +35,53 @@ class User(BaseModel):
     
     def create(self, username: str) -> int:
         """Создание нового пользователя"""
+        # Шифруем username перед сохранением
+        encrypted_username = self.crypto.encrypt_username(username) if self.crypto else username
+        
         query = """
         INSERT INTO users (username, created_at)
         VALUES (?, ?)
         """
-        return self.execute_update(query, (username, datetime.now().isoformat()))
+        return self.execute_update(query, (encrypted_username, datetime.now().isoformat()))
     
     def get_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         """Получение пользователя по имени"""
+        # Шифруем username для поиска в БД
+        encrypted_username = self.crypto.encrypt_username(username) if self.crypto else username
+        
         query = "SELECT * FROM users WHERE username = ?"
-        result = self.execute_query(query, (username,))
-        return result[0] if result else None
+        result = self.execute_query(query, (encrypted_username,))
+        
+        if result:
+            # Дешифруем username перед возвратом
+            if self.crypto:
+                result[0]['username'] = self.crypto.decrypt_username(result[0]['username'])
+            return result[0]
+        return None
     
     def get_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Получение пользователя по ID"""
         query = "SELECT * FROM users WHERE id = ?"
         result = self.execute_query(query, (user_id,))
-        return result[0] if result else None
+        
+        if result:
+            # Дешифруем username перед возвратом
+            if self.crypto:
+                result[0]['username'] = self.crypto.decrypt_username(result[0]['username'])
+            return result[0]
+        return None
     
     def get_all(self) -> List[Dict[str, Any]]:
         """Получение всех пользователей"""
         query = "SELECT * FROM users ORDER BY username"
-        return self.execute_query(query)
+        results = self.execute_query(query)
+        
+        # Дешифруем username для всех пользователей
+        if self.crypto:
+            for user in results:
+                user['username'] = self.crypto.decrypt_username(user['username'])
+        
+        return results
     
     def get_or_create(self, username: str) -> Dict[str, Any]:
         """Получение или создание пользователя"""
@@ -63,6 +89,8 @@ class User(BaseModel):
         if not user:
             user_id = self.create(username)
             user = self.get_by_id(user_id)
+            if not user:
+                raise RuntimeError(f"Не удалось создать/получить пользователя {username}")
         return user
     
     def get_all_with_device_count(self) -> List[Dict[str, Any]]:
@@ -75,35 +103,67 @@ class User(BaseModel):
         GROUP BY u.id, u.username, u.created_at
         ORDER BY u.username
         """
-        return self.execute_query(query)
+        results = self.execute_query(query)
+        
+        # Дешифруем username для всех пользователей
+        if self.crypto:
+            for user in results:
+                user['username'] = self.crypto.decrypt_username(user['username'])
+        
+        return results
 
 class Device(BaseModel):
     """Модель устройства"""
     
     def create(self, vid: str, pid: str, serial: str, name: str = "", description: str = "") -> int:
         """Создание нового устройства"""
+        # Шифруем serial перед сохранением
+        encrypted_serial = self.crypto.encrypt_serial(serial) if self.crypto else serial
+        
         query = """
         INSERT INTO devices (vid, pid, serial, name, description, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
         """
-        return self.execute_update(query, (vid, pid, serial, name, description, datetime.now().isoformat()))
+        return self.execute_update(query, (vid, pid, encrypted_serial, name, description, datetime.now().isoformat()))
     
     def get_by_identifiers(self, vid: str, pid: str, serial: str) -> Optional[Dict[str, Any]]:
         """Получение устройства по VID/PID/Serial"""
+        # Шифруем serial для поиска в БД
+        encrypted_serial = self.crypto.encrypt_serial(serial) if self.crypto else serial
+        
         query = "SELECT * FROM devices WHERE vid = ? AND pid = ? AND serial = ?"
-        result = self.execute_query(query, (vid, pid, serial))
-        return result[0] if result else None
+        result = self.execute_query(query, (vid, pid, encrypted_serial))
+        
+        if result:
+            # Дешифруем serial перед возвратом
+            if self.crypto:
+                result[0]['serial'] = self.crypto.decrypt_serial(result[0]['serial'])
+            return result[0]
+        return None
     
     def get_by_id(self, device_id: int) -> Optional[Dict[str, Any]]:
         """Получение устройства по ID"""
         query = "SELECT * FROM devices WHERE id = ?"
         result = self.execute_query(query, (device_id,))
-        return result[0] if result else None
+        
+        if result:
+            # Дешифруем serial перед возвратом
+            if self.crypto:
+                result[0]['serial'] = self.crypto.decrypt_serial(result[0]['serial'])
+            return result[0]
+        return None
     
     def get_all(self) -> List[Dict[str, Any]]:
         """Получение всех устройств"""
         query = "SELECT * FROM devices ORDER BY name, vid, pid"
-        return self.execute_query(query)
+        results = self.execute_query(query)
+        
+        # Дешифруем serial для всех устройств
+        if self.crypto:
+            for device in results:
+                device['serial'] = self.crypto.decrypt_serial(device['serial'])
+        
+        return results
     
     def get_or_create(self, vid: str, pid: str, serial: str, name: str = "", description: str = "") -> Dict[str, Any]:
         """Получение или создание устройства"""
@@ -111,9 +171,11 @@ class Device(BaseModel):
         if not device:
             device_id = self.create(vid, pid, serial, name, description)
             device = self.get_by_id(device_id)
+            if not device:
+                raise RuntimeError(f"Не удалось создать/получить устройство {vid}:{pid}:{serial}")
         return device
     
-    def update(self, device_id: int, name: str = None, description: str = None) -> bool:
+    def update(self, device_id: int, name: Optional[str] = None, description: Optional[str] = None) -> bool:
         """Обновление информации об устройстве"""
         updates = []
         params = []
@@ -153,7 +215,15 @@ class Permission(BaseModel):
         WHERE p.user_id = ?
         ORDER BY d.name, d.vid, d.pid
         """
-        return self.execute_query(query, (user_id,))
+        results = self.execute_query(query, (user_id,))
+        
+        # Дешифруем serial для всех устройств
+        if self.crypto:
+            for perm in results:
+                if 'serial' in perm:
+                    perm['serial'] = self.crypto.decrypt_serial(perm['serial'])
+        
+        return results
     
     def check_permission(self, user_id: int, device_id: int) -> Optional[bool]:
         """Проверка разрешения пользователя на устройство"""
@@ -191,7 +261,15 @@ class Permission(BaseModel):
         WHERE p.user_id = ? AND p.granted = 1
         ORDER BY d.name, d.vid, d.pid
         """
-        return self.execute_query(query, (user_id,))
+        results = self.execute_query(query, (user_id,))
+        
+        # Дешифруем serial для всех устройств
+        if self.crypto:
+            for device in results:
+                if 'serial' in device:
+                    device['serial'] = self.crypto.decrypt_serial(device['serial'])
+        
+        return results
 
 class Request(BaseModel):
     """Модель запросов на разрешения"""
@@ -218,6 +296,11 @@ class Request(BaseModel):
         WHERE r.id = ?
         """
         result = self.execute_query(query, (request_id,))
+        
+        if result and self.crypto:
+            result[0]['username'] = self.crypto.decrypt_username(result[0]['username'])
+            result[0]['serial'] = self.crypto.decrypt_serial(result[0]['serial'])
+        
         return result[0] if result else None
     
     def get_pending(self) -> List[Dict[str, Any]]:
@@ -230,7 +313,15 @@ class Request(BaseModel):
         WHERE r.status = ?
         ORDER BY r.created_at DESC
         """
-        return self.execute_query(query, (self.STATUS_PENDING,))
+        results = self.execute_query(query, (self.STATUS_PENDING,))
+        
+        # Дешифруем username и serial
+        if self.crypto:
+            for req in results:
+                req['username'] = self.crypto.decrypt_username(req['username'])
+                req['serial'] = self.crypto.decrypt_serial(req['serial'])
+        
+        return results
     
     def get_all(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Получение всех запросов"""
@@ -242,7 +333,15 @@ class Request(BaseModel):
         ORDER BY r.created_at DESC
         LIMIT ?
         """
-        return self.execute_query(query, (limit,))
+        results = self.execute_query(query, (limit,))
+        
+        # Дешифруем username и serial
+        if self.crypto:
+            for req in results:
+                req['username'] = self.crypto.decrypt_username(req['username'])
+                req['serial'] = self.crypto.decrypt_serial(req['serial'])
+        
+        return results
     
     def update_status(self, request_id: int, status: str) -> bool:
         """Обновление статуса запроса"""
@@ -268,8 +367,8 @@ class Request(BaseModel):
         result = self.execute_query(query, (user_id, device_id, self.STATUS_PENDING))
         return result[0] if result else None
     
-    def get_filtered(self, status: str = None, username: str = None, 
-                    date_from: str = None, date_to: str = None, limit: int = None) -> List[Dict[str, Any]]:
+    def get_filtered(self, status: Optional[str] = None, username: Optional[str] = None, 
+                    date_from: Optional[str] = None, date_to: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Получение отфильтрованных запросов"""
         query = """
         SELECT r.*, u.username, d.vid, d.pid, d.serial, d.name, d.description

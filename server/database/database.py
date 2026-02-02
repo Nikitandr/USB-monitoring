@@ -2,16 +2,23 @@ import sqlite3
 import os
 from typing import Optional
 from database.models import User, Device, Permission, Request
+from crypto import CryptoManager, get_encryption_keys
 
 class Database:
     """Класс для управления базой данных"""
     
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self.user = User(db_path)
-        self.device = Device(db_path)
-        self.permission = Permission(db_path)
-        self.request = Request(db_path)
+        
+        # Инициализируем CryptoManager
+        blowfish_key, rc4_key = get_encryption_keys()
+        self.crypto_manager = CryptoManager(blowfish_key, rc4_key)
+        
+        # Передаем crypto_manager во все модели
+        self.user = User(db_path, self.crypto_manager)
+        self.device = Device(db_path, self.crypto_manager)
+        self.permission = Permission(db_path, self.crypto_manager)
+        self.request = Request(db_path, self.crypto_manager)
     
     def init_db(self) -> bool:
         """Инициализация базы данных"""

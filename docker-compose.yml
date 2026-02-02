@@ -19,6 +19,9 @@ services:
       - SSL_ENABLED=true
       - SSL_CERT_PATH=/app/certs/server.crt
       - SSL_KEY_PATH=/app/certs/server.key
+      # Ключи шифрования (криптографически стойкие)
+      - BLOWFISH_KEY=80fcc4b53462555f04cf22bc624fd37e639ecad534ea396da76cec
+      - RC4_KEY=11406f85adb5cf316b9a31da842d4cee
     restart: unless-stopped
     networks:
       - usb-monitor-network
